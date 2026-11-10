@@ -1,0 +1,17 @@
+{
+  "effort": "base",
+  "autoReview": [
+    "open"
+  ],
+  "triggerOnDrafts": false,
+  "disabledLabels": [
+    "no-greptile",
+    "no-ai-review"
+  ],
+  "excludeAuthors": [
+    "dependabot[bot]",
+    "renovate[bot]",
+    "*-bot"
+  ],
+  "ignorePatterns": "package-lock.json\nyarn.lock\npnpm-lock.yaml\nuv.lock\npoetry.lock\n*.generated.*\n**/dist/**\n**/build/**\nCHANGELOG.md"
+}
