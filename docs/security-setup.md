@@ -22,7 +22,7 @@ Prices change. Check each vendor's pricing page before you rely on a number here
 
 **New repo:** on the template's GitHub page, click **Use this template → Create a new repository**.
 
-**Existing repo:** copy these paths into it: `Scripts/githooks/`, `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.gitattributes`, `.gitleaksignore`, and, if you'll use them, `.coderabbit.yaml` and `.greptile/config.json`. If you already have a `.nvmrc`, keep yours; the workflows read it. Merge `.gitignore` by hand.
+**Existing repo:** copy these paths into it: `Scripts/githooks/`, `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.nvmrc`, `.gitattributes`, `.gitleaksignore`, and, if you'll use them, `.coderabbit.yaml` and `.greptile/config.json`. The workflows read `.nvmrc` for the Node version, so it has to exist; if you already have one, keep yours. Merge `.gitignore` by hand. `.gitattributes` matters on Windows: it keeps the hook scripts' line endings as LF, and `sh` fails on CRLF.
 
 A template copies **files only**. Repository settings, rulesets and installed apps do not come along. Steps 3, 4 and 6 cover the ones that matter.
 
@@ -110,22 +110,23 @@ sh Scripts/githooks/test-pre-commit.sh
 |---|---|
 | `gitleaks` | Secrets in the commits the event introduced; full history on the timer. Includes merge commits and files marked `-diff`. |
 | `osv-scanner` | Known vulnerabilities in every lockfile and manifest, **and** in the GitHub Actions your workflows use. |
-| `npm audit` | High and critical advisories in `package-lock.json`. |
-| `npm audit signatures` | Every installed npm package has a valid registry signature. |
+| `npm audit` | High and critical advisories in the npm lockfile, across every dependency type (dev, optional and peer included). |
+| `npm audit signatures` | Every package installed **from a registry** has a valid registry signature. Packages from a git URL, a tarball URL or a local path have no registry signature; npm skips them, and the job lists them as warnings. |
 
-The two npm jobs skip, with a notice, when there is no `package-lock.json` at the repo root.
+The two npm jobs skip, with a notice, when there is no `package-lock.json` or `npm-shrinkwrap.json` at the repo root. A pull request that removes the base branch's lockfile fails them instead.
 
 How it's hardened:
 
 - Actions are pinned to commit SHAs, not tags. A tag can be moved to different code; a SHA cannot.
 - Scanner binaries are downloaded at a pinned version and checked against the release's checksums.
 - The token is read-only, and checkout does not keep credentials.
-- A pull request cannot suppress its own findings: gitleaks ignores `gitleaks:allow` comments and uses the base branch's suppression files, and osv-scanner reads an empty config from outside the checkout.
+- A pull request's suppression files are not used: gitleaks ignores `gitleaks:allow` comments and reads the base branch's `.gitleaks.toml` and `.gitleaksignore`, osv-scanner reads an empty config from outside the checkout, and the npm jobs use the base branch's `.npmrc`.
+- **What it cannot stop:** a pull request can edit the workflow itself, for example skipping a job with `if: false`. GitHub counts a skipped job as passing a required check. So the scans are only as strong as the review of changes under `.github/`. Make that review mandatory: add a `.github/CODEOWNERS` line such as `/.github/ @your-github-username`, and turn on **Require review from Code Owners** in the ruleset below.
 - A scanner error fails the job with a message that says it's an error, so an outage never looks like a clean scan.
 
 `.github/workflows/githooks.yml` runs the hook's test suite and shellcheck on every change.
 
-**Make the checks required.** A workflow that fails but does not block a merge is only a warning. In **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on **Require a pull request before merging** and **Require status checks to pass**, and add `gitleaks`, `osv-scanner`, `npm audit`, `npm audit signatures`, `hook test suite` and `shellcheck`. A check that has never run in the repo won't appear in the list until it has run once.
+**Make the checks required.** A workflow that fails but does not block a merge is only a warning. In **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on **Require a pull request before merging** and **Require status checks to pass**, and add `gitleaks`, `osv-scanner`, `npm audit`, `npm audit signatures`, `hook test suite` and `shellcheck`. A check that has never run in the repo won't appear in the list until it has run once. Add **Require review from Code Owners** too, with the `CODEOWNERS` line above, so a change to the workflows needs your approval.
 
 **Undo:** delete the workflow files, and remove the checks from the ruleset first.
 
