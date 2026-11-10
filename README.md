@@ -40,7 +40,7 @@ Everything in the core setup is free. The optional parts (Snyk, Greptile, and Co
 
 4. In your new repo on GitHub, turn on the settings a template cannot copy: **Settings → Advanced Security** (called **Code security** on some accounts) → Dependabot alerts, Dependabot security updates, and Private vulnerability reporting.
 5. Make the CI checks required, and require your review for changes under `.github/`: a pull request that edits a workflow can switch its scans off ([docs/security-setup.md, step 3](docs/security-setup.md#3-ci-security-workflow)).
-6. Edit `SECURITY.md` and the copyright line in `LICENSE`, and replace `AGENTS.md` with your project's own guide. Delete `CHANGELOG.md`: it records this template's versions, not yours.
+6. Edit `SECURITY.md` and the copyright line in `LICENSE`, and replace the project section of `AGENTS.md` with your own (keep its security rules). Delete `CHANGELOG.md`: it records this template's versions, not yours.
 
 The full walkthrough, with what each step costs and how to undo it, is in [docs/security-setup.md](docs/security-setup.md).
 

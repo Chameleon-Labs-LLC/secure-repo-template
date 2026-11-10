@@ -51,6 +51,10 @@
 HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$HOOK_DIR/_lib.sh"
 
+# The repo's own .git/hooks/pre-commit runs FIRST, on purpose. Formatters and
+# lint-staged re-stage files; running them first means gitleaks below scans
+# the index that will actually be committed. Moving this call after the scan
+# would let re-staged content through unscanned.
 chain_local_hook pre-commit "$@" || exit $?
 
 TOP=$(git rev-parse --show-toplevel)
@@ -313,7 +317,9 @@ fi
 
 # Snyk org: SNYK_ORG if set, otherwise the CLI's default org. ORG also names
 # the usage-counter file, so counts stay per org.
-REMOTE=$(git remote get-url origin 2>/dev/null)
+# Strip any credentials (https://user:token@host/...) from the URL: it is
+# passed to Snyk on the command line, where other local users can read it.
+REMOTE=$(git remote get-url origin 2>/dev/null | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]*@#\1#')
 if [ -n "${SNYK_ORG:-}" ]; then
   # The counter filename gets a sanitised copy, so a slash cannot escape the dir.
   ORG=$(printf '%s' "$SNYK_ORG" | tr -c 'A-Za-z0-9._-' '_'); ORG_OPT="--org=$SNYK_ORG"

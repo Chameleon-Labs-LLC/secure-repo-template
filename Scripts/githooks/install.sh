@@ -149,6 +149,8 @@ fi
 mkdir -p "$DEST/usage"
 : > "$DEST/$MARKER"
 for f in "$SRC"/*; do
+  # Regular files only: per-repo use leaves a usage/ directory here.
+  [ -f "$f" ] || continue
   case "$(basename "$f")" in install.sh|test-pre-commit.sh|*.md) continue ;; esac
   cp "$f" "$DEST/"
   chmod +x "$DEST/$(basename "$f")"

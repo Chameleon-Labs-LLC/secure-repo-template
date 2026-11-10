@@ -43,13 +43,27 @@ It **fails closed**:
 Linux and WSL, from the checksum-verified release (no `sudo` needed; the hook also looks in `~/.local/bin`):
 
 ```bash
-V=8.30.1
-B="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
-curl -fsSLO "${B}/gitleaks_${V}_linux_x64.tar.gz"
-curl -fsSLO "${B}/gitleaks_${V}_checksums.txt"
-grep " gitleaks_${V}_linux_x64.tar.gz$" "gitleaks_${V}_checksums.txt" | sha256sum -c -
-mkdir -p ~/.local/bin && tar -xzf "gitleaks_${V}_linux_x64.tar.gz" -C ~/.local/bin gitleaks
+(
+  set -eu
+  V=8.30.1
+  case "$(uname -m)" in
+    x86_64) A=x64 ;;
+    aarch64|arm64) A=arm64 ;;
+    *) echo "no gitleaks build listed here for $(uname -m)"; exit 1 ;;
+  esac
+  F="gitleaks_${V}_linux_${A}.tar.gz"
+  B="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+  cd "$(mktemp -d)"
+  curl -fsSLO "${B}/${F}"
+  curl -fsSLO "${B}/gitleaks_${V}_checksums.txt"
+  grep " ${F}$" "gitleaks_${V}_checksums.txt" | sha256sum -c -
+  mkdir -p ~/.local/bin
+  tar -xzf "${F}" -C ~/.local/bin gitleaks
+  ~/.local/bin/gitleaks version
+)
 ```
+
+It runs in a subshell with `set -e`, so a failed checksum stops it before anything is installed.
 
 Git Bash on Windows (then open a new Git Bash window):
 
@@ -59,11 +73,19 @@ winget install --id Gitleaks.Gitleaks --scope user
 
 **Install the hooks.** Pick one.
 
-For this repository only (edits to the hooks apply at once; `sh Scripts/githooks/install.sh --repo` does the same thing):
+For this repository only (edits to the hooks apply at once). First check that nothing else owns the setting; this should print nothing:
+
+```bash
+git config --get core.hooksPath
+```
+
+If it prints a path (Husky's `.husky`, for example), setting it below would switch those hooks off. Then:
 
 ```bash
 git config core.hooksPath Scripts/githooks
 ```
+
+`sh Scripts/githooks/install.sh --repo` does the same, and does the check for you: it refuses to replace another value without `--force`.
 
 For every repository on this machine (copies the hooks to `~/.githooks` and sets the global `core.hooksPath` there; re-run it after you edit a hook):
 
@@ -81,7 +103,7 @@ WSL and Git Bash each have their own git and global config, so run the global in
 
 Two things to know:
 
-- The hooks run a repo's own `.git/hooks/<name>` after their own checks, so existing local hooks keep working.
+- The hooks chain to a repo's own `.git/hooks/<name>`, so existing local hooks keep working. For `pre-commit` the local hook runs **first**, so a formatter that re-stages files runs before gitleaks scans the index. Chained: the commit, merge, rebase, checkout, push, `git am`, `gc` and `send-email` hooks. Not chained, because they run very often or speak a special protocol: `reference-transaction`, `post-index-change`, `fsmonitor-watchman`, the `p4-*` hooks, and server-side hooks.
 - A repo with its **own** `core.hooksPath` (Husky sets one) overrides the global setting, and these hooks do not run there. `git config --local --get core.hooksPath` shows it.
 
 **When it blocks you.**
@@ -109,7 +131,7 @@ sh Scripts/githooks/test-pre-commit.sh
 | Job | What it checks |
 |---|---|
 | `gitleaks` | Secrets in the commits the event introduced; full history on the timer. Includes merge commits and files marked `-diff`. |
-| `osv-scanner` | Known vulnerabilities in every lockfile and manifest, **and** in the GitHub Actions your workflows use. |
+| `osv-scanner` | Known vulnerabilities in the lockfiles and manifests osv-scanner reads, **and** in the GitHub Actions your workflows use. It does not read `pyproject.toml`, so the workflow copies the **static** dependencies of a **root** `pyproject.toml` into a list it can read. Dynamic dependencies and nested `pyproject.toml` files are not covered; commit a lockfile osv-scanner reads (`uv.lock`, `poetry.lock`, `requirements.txt`) for those. |
 | `npm audit` | High and critical advisories in the npm lockfile, across every dependency type (dev, optional and peer included). |
 | `npm audit signatures` | Every package installed **from a registry** has a valid registry signature. Packages from a git URL, a tarball URL or a local path have no registry signature; npm skips them, and the job lists them as warnings. |
 
@@ -126,7 +148,7 @@ How it's hardened:
 
 `.github/workflows/githooks.yml` runs the hook's test suite and shellcheck on every change.
 
-**Make the checks required.** A workflow that fails but does not block a merge is only a warning. In **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on **Require a pull request before merging** and **Require status checks to pass**, and add `gitleaks`, `osv-scanner`, `npm audit`, `npm audit signatures`, `hook test suite` and `shellcheck`. A check that has never run in the repo won't appear in the list until it has run once. Add **Require review from Code Owners** too, with the `CODEOWNERS` line above, so a change to the workflows needs your approval.
+**Make the checks required.** A workflow that fails but does not block a merge is only a warning. In **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on **Require a pull request before merging** and **Require status checks to pass**, and add `gitleaks`, `osv-scanner`, `npm audit`, `npm audit signatures`, `hook test suite` and `shellcheck`. A check that has never run in the repo won't appear in the list until it has run once. Add **Require review from Code Owners** too, with the `CODEOWNERS` line above, so a change to the workflows needs your approval, and **Dismiss stale pull request approvals when new commits are pushed**, so an approval cannot carry over to a workflow change pushed after it.
 
 **Undo:** delete the workflow files, and remove the checks from the ruleset first.
 
@@ -135,7 +157,7 @@ How it's hardened:
 `.github/dependabot.yml` keeps dependencies current:
 
 - Security updates are grouped into one PR per ecosystem.
-- Version updates run weekly, minor and patch only, grouped. Majors are left for you to do by hand with the changelog read. That `ignore` applies to version updates only; a security fix in a new major still arrives.
+- Version updates run weekly, minor and patch only, grouped. For npm and pip, majors are left for you to do by hand with the changelog read; that `ignore` applies to version updates only, and a security fix in a new major still arrives. For GitHub Actions, majors come as their own grouped PR, because a version update is the only way a SHA-pinned action ever gets updated.
 - A 7-day `cooldown` before Dependabot proposes a new version, matching step 5. Security updates are not delayed.
 - GitHub Actions is on. The npm and pip blocks are written but commented out; uncomment the ones your project uses and set `directory`.
 
