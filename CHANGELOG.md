@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-09
+
+### Added
+- Pre-commit hook (`Scripts/githooks/`) that runs gitleaks on staged changes and fails closed: a found secret, a missing scanner or an errored scan blocks the commit. Optional Snyk checks run only when dependencies change.
+- `install.sh` for a global install (`~/.githooks`, or `GITHUB_ROOT`) or a per-repo one, with uninstall. It will not replace another tool's hooks setup without `--force`.
+- CI security workflow: gitleaks, osv-scanner (including GitHub Actions and `pyproject.toml` dependencies), `npm audit` and `npm audit signatures`. A pull request's own suppression files and `.npmrc` are not used.
+- CI workflow for the hook test suite and shellcheck.
+- Dependabot with grouped updates and a 7-day cooldown, `.npmrc` minimum package age, CodeRabbit and Greptile configs.
+- README, SECURITY, CONTRIBUTING, AGENTS.md and a step-by-step security setup guide. Supported: Linux, WSL and Git Bash.
+
 ## [0.0.1] - 2026-11-09
 
 ### Changed
