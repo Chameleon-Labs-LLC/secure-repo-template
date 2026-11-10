@@ -41,6 +41,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Install gitleaks 8.30.1 (checksum-verified release binary)
+        # Download OUTSIDE the checkout: a PR controls the checkout and could
+        # commit a symlink named like a download target for curl to write through.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=8.30.1
@@ -154,6 +157,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install osv-scanner 2.7.0 (checksum-verified release binary)
+        # Download OUTSIDE the checkout: a PR controls the checkout and could
+        # commit a symlink named like a download target for curl to write through.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=2.7.0
@@ -175,6 +181,37 @@ jobs:
           # replaces the per-directory lookup, so no osv-scanner.toml in the
           # checkout is read. If you need a reviewed ignore, put it here.
           : > "$RUNNER_TEMP/osv-scanner-trusted.toml"
+      # osv-scanner 2.7.0 does not read pyproject.toml. A Python project whose
+      # dependencies live only there would get a green scan with zero Python
+      # packages checked. So copy its declared dependencies into a requirements
+      # file OUTSIDE the checkout, which the scan below adds with -L and
+      # resolves transitively. Root pyproject.toml only; change the path if
+      # yours is elsewhere. Known limit: a spec with an upper bound
+      # (`pkg>=3.1,<3.3`) may be reported as unscannable rather than resolved.
+      - name: List pyproject.toml dependencies for the scan
+        run: |
+          set -eu
+          if [ ! -f pyproject.toml ]; then
+            echo "no pyproject.toml at the repo root; nothing to list"
+            exit 0
+          fi
+          python3 - "$RUNNER_TEMP/pyproject-requirements.txt" <<'PY'
+          import sys, tomllib
+          with open("pyproject.toml", "rb") as fh:
+              data = tomllib.load(fh)
+          project = data.get("project", {})
+          deps = list(project.get("dependencies", []))
+          for extra in project.get("optional-dependencies", {}).values():
+              deps += extra
+          for group in data.get("dependency-groups", {}).values():
+              deps += [d for d in group if isinstance(d, str)]
+          if not deps:
+              print("::warning title=osv-scanner::pyproject.toml declares no static dependencies "
+                    "(dynamic ones are not read); its Python packages are not scanned")
+          with open(sys.argv[1], "w", encoding="utf-8") as out:
+              out.write("".join(d + "\n" for d in deps))
+          print(f"{len(deps)} pyproject.toml dependencies listed for the scan")
+          PY
       # osv-scanner exit codes: 0 clean, 1 vulnerabilities found, anything else
       # is a scanner error (bad flag, no packages found, network) and must never
       # look like a findings result.
@@ -190,8 +227,14 @@ jobs:
           # Naming plugins REPLACES the default list, so all four are listed.
           # --no-ignore: a pull request can add .gitignore rules that hide
           # tracked manifests or workflows from a recursive scan.
+          # -L adds the pyproject.toml dependencies listed by the step above.
+          extra=()
+          if [ -s "$RUNNER_TEMP/pyproject-requirements.txt" ]; then
+            extra=(-L "requirements.txt:$RUNNER_TEMP/pyproject-requirements.txt")
+          fi
           osv-scanner scan source --recursive --no-ignore \
             --config "$RUNNER_TEMP/osv-scanner-trusted.toml" ./ \
+            "${extra[@]}" \
             --x-plugins lockfile --x-plugins sbom --x-plugins directory \
             --x-plugins github/actions || rc=$?
           case "$rc" in

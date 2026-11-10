@@ -48,6 +48,9 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install gitleaks 8.30.1 (checksum-verified release binary)
+        # Download OUTSIDE the checkout: a PR controls the checkout and could
+        # commit a symlink named like a download target for curl to write through.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=8.30.1
@@ -79,6 +82,9 @@ jobs:
       # underneath you turns an unrelated PR red. This release publishes no
       # checksums file, so the digest is recorded here.
       - name: Install shellcheck 0.11.0 (digest-verified release binary)
+        # Download OUTSIDE the checkout: a PR controls the checkout and could
+        # commit a symlink named like a download target for curl to write through.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=0.11.0
