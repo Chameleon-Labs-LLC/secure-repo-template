@@ -1,0 +1,5 @@
+#!/bin/sh
+# Global post-merge hook: no logic of its own. Chains to the repo-local .git/hooks/post-merge if present.
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$HOOK_DIR/_lib.sh"
+chain_local_hook post-merge "$@"

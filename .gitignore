@@ -1,0 +1,26 @@
+# Secrets. Commit an example file with placeholder values instead.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and build output
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+dist/
+build/
+coverage/
+
+# Usage counters the pre-commit hook writes when installed with --repo
+githooks/usage/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

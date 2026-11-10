@@ -1,0 +1,126 @@
+# CodeRabbit configuration -- https://docs.coderabbit.ai/reference/configuration
+#
+# Nothing here happens until the CodeRabbit GitHub App is installed on the
+# repository. The file only tunes it.
+#
+# These settings do not turn CodeRabbit down: `profile` stays `chill` and
+# source review is untouched. They aim the Markdown review at the one defect a
+# diff-scoped reviewer can genuinely add on a rules file (a rule here
+# contradicting the same rule somewhere else) and away from re-phrasing prose
+# that is already correct.
+
+language: en-US
+
+reviews:
+  # quiet | chill | assertive. `assertive` is documented as "may feel nitpicky".
+  # `quiet` would drop Major findings out of inline comments into the summary,
+  # where they are easy to miss.
+  profile: chill
+
+  # Never auto-approve: the merge gates are the required checks plus a human
+  # reading the findings, not a bot's approval state.
+  auto_approvals:
+    enabled: false
+
+  high_level_summary: true
+
+  # An errored review defaults to a NEUTRAL check run and a SUCCESSFUL commit
+  # status, with the error buried in the description -- green for something that
+  # never happened. true makes it fail instead.
+  #
+  # What this does NOT cover: CodeRabbit documents "Rate-limited reviews never
+  # fail", and a skipped review passes too. Both arrive as a GREEN check. The
+  # way to tell a review from a non-review is the check run's OUTPUT TITLE --
+  # `Finished` means reviewed, while `Review rate limited` and `Review skipped`
+  # mean it did not run. Ask for the PULL REQUEST's head, not your local HEAD;
+  # an empty result means no check at all, which is not a pass:
+  #   SHA=$(gh pr view <PR> --json headRefOid -q .headRefOid)
+  #   gh api "repos/OWNER/REPO/commits/$SHA/check-runs" \
+  #     --jq '.check_runs[]|select(.name=="CodeRabbit")|.output.title' \
+  #     | grep . || echo "NO CodeRabbit check -- that head is NOT reviewed"
+  # This setting narrows the hole; it does not close it.
+  fail_commit_status: true
+
+  auto_review:
+    enabled: true
+
+    # The default covers the DEFAULT BRANCH only, so a PR onto any other
+    # branch is skipped silently. `.*` is a regex over base-branch names, not
+    # a glob.
+    base_branches: [".*"]
+
+    # Reviewing drafts spends rate limit on work that is not asking to merge.
+    # A draft therefore reports `Review skipped` -- expected, not a failure.
+    # Marking it ready does not reliably review the commits it already had;
+    # comment `@coderabbitai full review` to get one (no new commit needed).
+    drafts: false
+
+    # Re-review every push, so the head you merge is the head that was read.
+    auto_incremental_review: true
+
+    # ...and `auto_incremental_review: true` ALONE DOES NOT GIVE YOU THAT.
+    # `auto_pause_after_reviewed_commits` defaults to 5: after five reviewed
+    # commits, automatic review stops and waiting cannot restart it (resume
+    # with `@coderabbitai resume`). 0 means never pause. The trade-off is
+    # review allowance on a busy branch; if it ever bites, lower this to a
+    # number rather than expecting every push to be reviewed on the default.
+    #
+    # Recovering a head that was NOT reviewed (failed, skipped, rate limited):
+    # comment `@coderabbitai full review`. A plain `@coderabbitai review` is
+    # INCREMENTAL -- on a head already recorded as reviewed it just replies
+    # that the last commit was already reviewed.
+    auto_pause_after_reviewed_commits: 0
+
+    # `!` is a negative match: a PR carrying the `no-ai-review` label is not
+    # reviewed. The same label is in `.greptile/config.json` `disabledLabels`,
+    # so one label skips both bots. It must be on the PR when the review fires
+    # (`gh pr create --label no-ai-review`), not added afterwards.
+    #
+    # The label has to EXIST in the repo first or `gh pr create --label` fails:
+    #   gh label create no-ai-review -c ededed \
+    #     -d "Skip all automated AI code review on this PR" --force
+    labels:
+      - "!no-ai-review"
+
+    # Dependency bumps are judged by the advisory and the lockfile diff, not by
+    # a reviewer reading them. Matches `excludeAuthors` in .greptile/config.json.
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+
+  # Generated and binary-ish paths; a leading `!` excludes. Kept in step with
+  # `ignorePatterns` in .greptile/config.json.
+  path_filters:
+    - "!package-lock.json"
+    - "!yarn.lock"
+    - "!pnpm-lock.yaml"
+    - "!uv.lock"
+    - "!poetry.lock"
+    - "!**/*.generated.*"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!CHANGELOG.md"
+
+  path_instructions:
+    - path: "**/*.md"
+      instructions: |
+        AGENTS.md, CLAUDE.md, and anything under docs/ are operational rules,
+        not product prose. AI coding agents and people read and follow them,
+        so a wrong rule causes a wrong action.
+
+        Report only:
+          - A rule here that contradicts the same rule stated in another file in
+            this repo, or that contradicts what the repo's own config actually
+            does (.github/**, githooks/**, .greptile/config.json,
+            .coderabbit.yaml, .npmrc). Name both sides. Check files outside the
+            diff: this is the defect a diff-scoped reviewer is most likely to
+            miss.
+          - A claim of enforcement that is not actually enforced: a doc saying a
+            check gates a merge when it is not a required status check, or a
+            command or path that does not exist.
+          - A procedure that cannot be followed as written -- wrong flag, wrong
+            order, a step that would fail.
+
+        Do not report: wording, tone, hedging, redundancy, heading style,
+        formatting, or the strength of a stated estimate. If the only change
+        you would make is how something is phrased, say nothing.

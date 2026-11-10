@@ -1,0 +1,5 @@
+# Store text with LF line endings and check it out with LF too, on every OS.
+# The hooks are shell scripts: with CRLF endings, sh fails on the stray \r
+# ("\r: command not found"), and that is easy to get on Windows when
+# core.autocrlf is true.
+* text=auto eol=lf

@@ -1,0 +1,118 @@
+# The pre-commit hook's test suite and shellcheck, on every PR and every push
+# to main.
+#
+# The hook is the only gate that stops a secret BEFORE it enters history (CI
+# scans afterwards), so its tests run on every change rather than when someone
+# remembers. There is no `paths` filter on purpose: the suite takes a couple of
+# minutes, and a gate that quietly stops running is the failure this workflow
+# exists to prevent.
+#
+# Same conventions as security.yml: actions and tools pinned (Dependabot
+# proposes the action bumps), `pull_request` never `pull_request_target`, a
+# read-only token, and each check in its own job so one failure never masks
+# the other.
+name: githooks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Run the gate against any ref, to tell a regression from an old failure:
+  #   gh workflow run githooks.yml --ref <branch>
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keyed on the ref, so PRs and main never cancel each other.
+concurrency:
+  group: githooks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hook-tests:
+    name: hook test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here needs authenticated git: the suite builds a throwaway
+          # repo of its own. A token left in the local git config is one more
+          # thing the scripts under test could read.
+          persist-credentials: false
+
+      # The dependency-delta cases parse package.json with a real `node`.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install gitleaks 8.30.1 (checksum-verified release binary)
+        run: |
+          set -eu
+          V=8.30.1
+          B="https://github.com/gitleaks/gitleaks/releases/download/v${V}"
+          curl -fsSLO "${B}/gitleaks_${V}_linux_x64.tar.gz"
+          curl -fsSLO "${B}/gitleaks_${V}_checksums.txt"
+          grep " gitleaks_${V}_linux_x64.tar.gz$" "gitleaks_${V}_checksums.txt" | sha256sum -c -
+          tar -xzf "gitleaks_${V}_linux_x64.tar.gz" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # The suite checks up front that git, node and gitleaks are all present
+      # and exits 1 if any is missing, so an absent tool fails loudly instead of
+      # silently skipping cases. It spends no Snyk quota: the cases either set
+      # SNYK_HOOK_MODE=off or put a stub `snyk` first on PATH.
+      - name: Run the hook test suite
+        run: sh githooks/test-pre-commit.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned rather than taken from the runner image: a linter that upgrades
+      # underneath you turns an unrelated PR red. This release publishes no
+      # checksums file, so the digest is recorded here.
+      - name: Install shellcheck 0.11.0 (digest-verified release binary)
+        run: |
+          set -eu
+          V=0.11.0
+          F="shellcheck-v${V}.linux.x86_64.tar.xz"
+          curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/v${V}/${F}"
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  ${F}" | sha256sum -c -
+          tar -xJf "${F}" "shellcheck-v${V}/shellcheck"
+          sudo install -m 0755 "shellcheck-v${V}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      # -s sh      the hooks run under sh (dash on Ubuntu, sh.exe in Git Bash).
+      # -x         follow `. _lib.sh` instead of reporting it unfollowable.
+      # --severity=warning   the gate. Info-level notes remain, mostly
+      #            SC2030/SC2031 (a variable changed inside a subshell) in the
+      #            test harness, which is intended there.
+      #
+      # The file list is built from shebangs rather than a blind glob, so a
+      # README in the directory does not fail as unparseable shell, and an
+      # EMPTY list fails loudly: a linter that checks nothing is worse than
+      # no linter.
+      - name: shellcheck the hooks
+        run: |
+          set -eu
+          files=""
+          for f in githooks/*; do
+            [ -f "$f" ] || continue
+            if head -1 "$f" | grep -qE '^#!.*\b(sh|bash|dash)\b'; then
+              files="$files $f"
+            fi
+          done
+          if [ -z "$files" ]; then
+            echo "::error title=shellcheck::no hook scripts found to lint; refusing to pass"
+            exit 1
+          fi
+          echo "linting:$files"
+          # shellcheck disable=SC2086  # deliberate: $files is a space-separated list
+          shellcheck -s sh -x --severity=warning $files

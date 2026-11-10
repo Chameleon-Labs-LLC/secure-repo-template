@@ -1,0 +1,581 @@
+#!/bin/sh
+# pre-commit hook: secret scan, then delta-aware dependency checks.
+# Install: sh githooks/install.sh (all repos) or sh githooks/install.sh --repo.
+# Guide: docs/security-setup.md.
+# Self-test (no Snyk quota spent): sh githooks/test-pre-commit.sh
+#
+# Order:
+#   0. gitleaks on the staged diff. Always runs, ~1 s, free, and FAILS CLOSED:
+#      a secret blocks, and so does a scan that could not be trusted -- a
+#      missing gitleaks binary (PATH or ~/.local/bin), or a scan that
+#      errored. An errored scan is not a clean scan, and a secret never
+#      enters history.
+#      We pass --exit-code 3, so the exit code is unambiguous: 0 clean,
+#      3 secret found, anything else a scan error. 3 is NEVER overridable;
+#      only a scan error is, with GITLEAKS_DEGRADED_OK=1, which must be
+#      explained in the commit message; `git commit --no-verify`
+#      is the only other way past, and that is a smell.
+#      False positive? Add a `gitleaks:allow` comment on the line or a
+#      .gitleaksignore entry.
+#      Why fail closed: CI scans too, but only after the push, when the secret
+#      is already in history. This hook is the only gate that stops it first.
+#   1. Snyk Open Source (optional: skipped when the snyk CLI is not installed), only for a staged manifest whose RESOLVED DEPENDENCIES
+#      changed: its dependency fields, or its lockfile beyond the root version
+#      fields (npm update / npm audit fix are lockfile-only and still count).
+#      A release commit that bumps "version" is not a dependency change and is
+#      not tested. Fails only on findings that have a fix available
+#      (--fail-on=all = upgrade or patch exists): a finding you can act on now.
+#   2. Snyk Code, at most once per repo per day (stamp in .git/), and only
+#      when the commit stages a file Snyk Code analyzes. A docs-, config-, or
+#      data-only commit spends no Code test.
+#
+# SNYK_HOOK_MODE (default: warn):
+#   warn   run the Snyk tests and report; never block on Snyk findings.
+#   block  also exit 1 on Snyk findings at SNYK_HOOK_SEVERITY+ with a fix.
+#   off    skip Snyk entirely. gitleaks still runs. Debugging the hook only.
+#
+# Budget rules (Snyk Free plan, counted per org, per month):
+#   - Open Source: one test per manifest. Runs only for manifests whose deps changed.
+#   - Code: one test per run. Runs at most once per repo per day, and only
+#     when source is staged.
+#   - Soft caps stop testing before the plan limit: SNYK_HOOK_OS_CAP (180), SNYK_HOOK_CODE_CAP (90).
+#     Check them against your own plan's limits.
+# SNYK_ORG: the Snyk org to test in (passed as --org). Unset = the CLI's default org.
+# Every switch below is enabled ONLY by the exact value 1. Anything else --
+# including "false", "no" and "" -- leaves it off, so a value meant to disable
+# a switch can never enable it.
+# Skip the Snyk tests once:  SNYK_SKIP=1 git commit ...   (gitleaks still runs; say why in the message)
+# Pass a DEGRADED gitleaks scan once: GITLEAKS_DEGRADED_OK=1 git commit ...   (never passes a found secret; say why in the message)
+# Force a Code test now:     SNYK_CODE_FORCE=1 git commit ...   (even with no source staged)
+
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$HOOK_DIR/_lib.sh"
+
+chain_local_hook pre-commit "$@" || exit $?
+
+TOP=$(git rev-parse --show-toplevel)
+GIT_DIR_PATH=$(git rev-parse --git-dir)
+case "$GIT_DIR_PATH" in /*|[A-Za-z]:/*) ;; *) GIT_DIR_PATH="$TOP/$GIT_DIR_PATH" ;; esac
+
+# ---- 0. gitleaks: staged changes, always, fails closed -------------------
+# Fails closed: a secret blocks, and so does a scan we cannot trust (missing
+# binary, or an errored scan). GITLEAKS_DEGRADED_OK=1 passes a degraded scan
+# only -- never a found secret.
+gitleaks_degraded() {
+  if [ "${GITLEAKS_DEGRADED_OK:-0}" = 1 ]; then
+    log "$1; GITLEAKS_DEGRADED_OK set, committing UNSCANNED -- say why in the commit message"
+    return 0
+  fi
+  log "$1; commit blocked. $2, or set GITLEAKS_DEGRADED_OK=1 for this commit and explain it in the message"
+  exit 1
+}
+
+# Resolve the binary, do not just ask PATH. A long-running process keeps the
+# PATH it was started with: a systemd user unit whose PATH predates the install
+# cannot see ~/.local/bin, and fail-closed would turn that into a blocked
+# commit on a machine where gitleaks is in fact installed. So fall back to the
+# conventional user-local bin before concluding it is absent.
+GITLEAKS=
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS=gitleaks
+elif [ -f "$HOME/.local/bin/gitleaks" ] && [ -x "$HOME/.local/bin/gitleaks" ]; then
+  GITLEAKS="$HOME/.local/bin/gitleaks"
+  # Say which binary scanned. Operationally this is the line that tells you a
+  # host is running on the fallback, and it is what lets T27 prove it took
+  # this branch rather than finding something on PATH after all.
+  log "gitleaks not on PATH; using $GITLEAKS"
+fi
+
+if [ -n "$GITLEAKS" ]; then
+  # --exit-code 3 reserves 3 for findings, so any other non-zero is a scan
+  # error and can be told apart from a real secret.
+  ( cd "$TOP" && "$GITLEAKS" git --pre-commit --staged --redact -v --no-banner --exit-code 3 )
+  rc=$?
+  case $rc in
+    0) ;;
+    3) log "gitleaks found a secret in the staged changes; commit blocked. Remove it, or mark a false positive with a 'gitleaks:allow' comment / .gitleaksignore. No environment variable passes a finding"
+       exit 1 ;;
+    *) gitleaks_degraded "gitleaks could not complete the scan (exit $rc), so the staged changes are unscanned" "Fix the scan (a bad .gitleaks.toml exits 1)" ;;
+  esac
+
+  # The scan above is `git diff --cached`, and it does not produce a patch for
+  # every staged file. A `-diff` or `binary` attribute, or a textconv driver,
+  # makes git print "Binary files ... differ" instead; gitleaks skips the
+  # non-archive binary diff, and the gate PASSES having read nothing. Measured
+  # 2026-11-02: a planted ghp_ token in such a file scanned 22 bytes and
+  # reported "no leaks found", exit 0. Deleting .gitleaks.toml does not help --
+  # different mechanism -- and neither does `--log-opts=--text`, because
+  # --pre-commit mode ignores log options, so the `--text` fix used in CI has
+  # no equivalent here.
+  #
+  # ASK GIT WHAT IT ACTUALLY RENDERED, not what the attributes say. `--numstat`
+  # prints "-" for added and deleted on exactly the paths it could not render
+  # as text. The difference is the whole point: `git diff --cached` resolves
+  # attributes from the WORKING TREE, while `git check-attr --cached` reads the
+  # INDEX, so a .gitattributes carrying `-diff` that is edited but NOT STAGED
+  # makes the two disagree -- the diff suppresses the file while an
+  # attribute-based guard reports `unspecified` and skips it, and neither reads
+  # the secret. That was this guard's first version; it was reproduced
+  # (worktree `unset`, index `unspecified`, hook exit 0) before being replaced.
+  #
+  # --no-renames keeps the -z records uniform at one per file: with rename
+  # detection a rename emits an EMPTY path followed by two more NUL-terminated
+  # paths, which a one-record-per-file parser silently mis-reads.
+  #
+  # The list stays NUL-separated end to end. Converting it to newlines means a
+  # filename CONTAINING a newline splits into nonexistent paths, the export
+  # fails, and a scan of the empty directory reports clean -- and newline
+  # filenames are creatable here, so that is reachable rather than theoretical.
+  #
+  # The normal scan above is deliberately left alone. Switching the whole gate
+  # to `gitleaks stdin` or to a temp materialisation also closes the hole, but
+  # stdin reports no file path and a temp scan makes every fingerprint
+  # temp-dir-relative, which would silently break the .gitleaksignore escape
+  # hatch this hook documents for false positives.
+  # Initialized BEFORE anything can trap on them. They are all assigned from
+  # mktemp just below, so an inherited value is always overwritten anyway --
+  # the explicit list is here because of what happened when one of them WAS
+  # NOT. This guard used to materialise files into a temp DIRECTORY, whose name
+  # was assigned deep inside the "there are unrenderable files" branch; on an
+  # ordinary text-only commit that assignment never ran, so if the calling
+  # environment exported that name the EXIT trap `rm -rf`'d a directory the
+  # hook never created. `${VAR:-}` guards against UNSET, not against INHERITED.
+  # Measured: a clean commit deleted the directory and still exited 0 -- silent
+  # data loss on the successful path. Reading staged blobs removed the temp
+  # directory entirely, so the bug has no home now; this list keeps a
+  # conditionally-assigned name from ever reaching a trap again.
+  UNRENDERED=
+  NUMSTAT=
+  NULS=
+  BINRAW=
+  BINTXT=
+  UNRENDERED=$(mktemp 2>/dev/null) || UNRENDERED=
+  NUMSTAT=$(mktemp 2>/dev/null) || NUMSTAT=
+  NULS=$(mktemp 2>/dev/null) || NULS=
+  BINRAW=$(mktemp 2>/dev/null) || BINRAW=
+  BINTXT=$(mktemp 2>/dev/null) || BINTXT=
+  if [ -z "$UNRENDERED" ] || [ -z "$NUMSTAT" ] || [ -z "$NULS" ] \
+     || [ -z "$BINRAW" ] || [ -z "$BINTXT" ]; then
+    gitleaks_degraded "could not create the temp files needed to find the staged files git cannot diff, so they are unscanned" "Free up TMPDIR"
+  else
+    # No other trap is set in this hook; these remove only these paths.
+    #
+    # Cleanup on EXIT, and a SEPARATE handler for signals. A POSIX trap on INT
+    # or TERM that merely cleans up RETURNS to where it was interrupted, so a
+    # Ctrl-C mid-scan would tidy the temp files and then carry straight on
+    # through the rest of the hook -- a fail-open on the one path that exists
+    # to fail closed. The signal handler exits, and the EXIT trap still fires
+    # after it, so nothing is left behind either way.
+    #
+    # The EXIT handler ends in `:` on purpose. It is belt-and-braces now that
+    # the last real command is an `rm -f` that returns 0 even on a missing
+    # file, but it used to end in `[ -n "${VAR:-}" ] && rm -rf ...`, which
+    # returns 1 whenever the variable is unset -- the common case -- and a
+    # trap's final status can surface as the script's own. Keep the `:` so the
+    # handler's exit status never depends on what its last command happens to
+    # be.
+    trap 'rm -f "$UNRENDERED" "$NUMSTAT" "$NULS" "$BINRAW" "$BINTXT"; :' EXIT
+    trap 'log "interrupted during the secret scan, so the staged changes are not fully scanned; commit blocked"; exit 1' INT TERM
+    # ACMRT, not ACMR: T is a TYPE change (symlink <-> regular file), and
+    # omitting it let a symlink replaced by a diff-suppressed regular file skip
+    # BOTH scans. Measured 2026-11-02: name-status T, ACMR returned nothing, the
+    # token was absent from the staged diff, hook exit 0. D stays excluded: a
+    # deleted path has no content and would only make checkout-index fail.
+    #
+    # Every step is checked. An empty list has to MEAN "nothing to scan" -- if
+    # git or awk fails the list is ALSO empty, and inferring "nothing to do"
+    # from that passed a secret the normal scan had not read either.
+    # PROVE the NUL parser works in this shell before trusting it. The first
+    # version used `awk 'BEGIN{RS="\0"}'`, which is a GNU awk extension: it
+    # worked on a machine with GNU Awk 5.0.0 and mis-parsed under mawk, which
+    # is Ubuntu's default awk and reads "\0" as the empty string, i.e.
+    # paragraph mode. The githooks workflow caught it on its first CI run --
+    # the mis-parse produced a bogus path, its export failed, and the degraded
+    # path then blocked EVERY commit. A parser that silently mis-reads is the
+    # worst outcome here, so this one is tested rather than assumed.
+    if [ "$(printf 'x\0' | sed -z -n 's/^x$/ok/p' 2>/dev/null | tr -d '\0')" != "ok" ]; then
+      gitleaks_degraded "this sed cannot read NUL-separated records, so the staged files git cannot diff are unscanned" "Install GNU sed (its -z is what reads a NUL-separated list safely)"
+    fi
+    git diff --cached --numstat -z --no-renames --diff-filter=ACMRT > "$NUMSTAT" 2>/dev/null
+    gitrc=$?
+    sed -z -n 's/^-\t-\t//p' < "$NUMSTAT" > "$UNRENDERED" 2>/dev/null
+    sedrc=$?
+    # Through a file, because a pipeline reports only its LAST command: a first
+    # `tr` that failed to read the list left `wc` counting empty input and
+    # printing 0, the numeric check accepted it, and the scan was skipped --
+    # the same "an empty result is not a clean result" bug as the detection
+    # step, one layer down.
+    tr -dc '\0' < "$UNRENDERED" > "$NULS" 2>/dev/null
+    trrc=$?
+    WANT=$(wc -c < "$NULS" 2>/dev/null | tr -d ' \t')
+    if [ "$trrc" -ne 0 ]; then
+      gitleaks_degraded "could not count the staged files git cannot diff (tr exit $trrc), so any such file is unscanned" "Check that tr works"
+    elif [ "$gitrc" -ne 0 ]; then
+      gitleaks_degraded "git could not list which staged files it cannot diff (exit $gitrc), so any such file is unscanned" "Fix the git error"
+    elif [ "$sedrc" -ne 0 ]; then
+      gitleaks_degraded "could not select the staged files git cannot diff (sed exit $sedrc), so any such file is unscanned" "Make sure GNU sed is on PATH"
+    else
+      case "${WANT:-x}" in
+        '' | *[!0-9]*)
+          gitleaks_degraded "could not count the staged files git cannot diff (got '${WANT:-}'), so any such file is unscanned" "Check that tr and wc work" ;;
+        *) ;;
+      esac
+    fi
+    if [ "${WANT:-0}" -gt 0 ]; then
+      log "git could not render $WANT staged file(s) as text, so the scan above did not read them; scanning their staged bytes directly:"
+      tr '\0' '\n' < "$UNRENDERED" | sed 's/^/          /' >&2
+      # Read the STAGED BLOBS, never a checkout. `git checkout-index` applies
+      # checkout conversions, smudge filters among them, so it can hand back
+      # transformed bytes while the blob that will actually be committed still
+      # holds the secret. Measured with `filter.hide.smudge` configured:
+      # checkout-index wrote "token = REDACTED" and gitleaks passed it, while
+      # the staged blob held the real token and gitleaks found it. A local
+      # filter definition is needed for that (`.git/config`, not the repo, so a
+      # PR cannot enable it alone) -- but git-lfs, git-crypt and templating
+      # setups all configure one, and a gate must read what it is gating.
+      #
+      # This also deletes the machinery that caused three earlier defects here:
+      # no temp directory (so the trap has no inherited path to delete), no
+      # export (so no exported-count check and no symlink false block), and no
+      # `gitleaks dir` over converted bytes. `gitleaks dir` did give per-file
+      # paths in findings, which is why it was used -- but it was reading the
+      # wrong bytes, and its fingerprints were temp-dir relative, so
+      # `.gitleaksignore` never applied on this path either way.
+      #
+      # The `printf` after each blob keeps a separator between files: with
+      # nothing between them one file's last byte runs into the next file's
+      # first and a rule needing a leading word boundary stops matching
+      # (measured: `npm_<36>` fires alone, not when prefixed by a word char).
+      if ! xargs -0 -r -n1 sh -c '
+             # :(literal) -- a bare "$1" is a PATHSPEC, so glob characters in
+             # a filename select OTHER files. Measured: looking up [A].bin
+             # matched 2 entries and head -1 returned the OID of A.bin, the
+             # clean file, while the secret in [A].bin went unread. With
+             # :(literal) it matches exactly 1 entry, the right one.
+             # NOTE: this whole script is single-quoted for sh -c, so no
+             # apostrophes here -- one of them closed the quote and broke the
+             # hook while writing this very comment.
+             oid=$(git ls-files -s -- ":(literal)$1" | cut -d" " -f2 | head -1)
+             [ -n "$oid" ] || exit 1
+             git cat-file blob "$oid" || exit 1
+             printf "\n"
+           ' _ < "$UNRENDERED" > "$BINRAW" 2>/dev/null; then
+        gitleaks_degraded "could not read the staged bytes of the $WANT file(s) git cannot diff, so they are unscanned" "Fix the git error above"
+      else
+        # TWO representations, because each hides what the other catches.
+        # Stripping NULs keeps a token that has NULs interleaved through it, but
+        # loses the word boundary when the boundary IS a NUL byte; translating
+        # NULs to newlines is the exact opposite. Measured both ways:
+        #   boundary is a NUL      tr -d  -> clean (MISSED)   tr NUL->\n -> found
+        #   NULs inside the token  tr -d  -> found            tr NUL->\n -> clean
+        # So the second pass runs whenever the first comes back clean.
+        rc=0
+        for xlate in strip newline; do
+          case "$xlate" in
+            strip)   tr -d '\0' < "$BINRAW" > "$BINTXT" 2>/dev/null ;;
+            newline) tr '\0' '\n' < "$BINRAW" > "$BINTXT" 2>/dev/null ;;
+          esac
+          if [ $? -ne 0 ]; then
+            gitleaks_degraded "could not build the $xlate representation of the staged bytes, so the $WANT file(s) git cannot diff are unscanned" "Fix the tr error"
+            break
+          fi
+          ( "$GITLEAKS" stdin --redact --no-banner --exit-code 3 ) < "$BINTXT"
+          rc=$?
+          [ "$rc" -eq 0 ] || break
+        done
+        case $rc in
+          0) ;;
+          3) log "gitleaks found a secret in the staged bytes of a file git cannot diff as text; commit blocked. The real file is one of those listed above -- a finding from this pass carries no path. No environment variable passes a finding"
+             exit 1 ;;
+          *) gitleaks_degraded "gitleaks could not scan the staged bytes of the $WANT file(s) git cannot diff (exit $rc)" "Fix the scan, or drop the attribute so the normal staged scan covers them" ;;
+        esac
+      fi
+    fi
+  fi
+
+else
+  gitleaks_degraded "gitleaks is not on PATH and not at ~/.local/bin/gitleaks, so the staged changes are unscanned" "Install it (winget install --id Gitleaks.Gitleaks --scope user, or the release tarball to ~/.local/bin)"
+fi
+
+if [ "${SNYK_SKIP:-0}" = 1 ]; then
+  log "SNYK_SKIP set: Snyk checks skipped for this commit (gitleaks already ran; explain the skip in the message)"
+  exit 0
+fi
+
+MODE=${SNYK_HOOK_MODE:-warn}
+if [ "$MODE" = off ]; then
+  exit 0
+fi
+if ! command -v snyk >/dev/null 2>&1; then
+  log "snyk CLI not on PATH, Snyk checks skipped"
+  exit 0
+fi
+
+# Snyk org: SNYK_ORG if set, otherwise the CLI's default org. ORG also names
+# the usage-counter file, so counts stay per org.
+REMOTE=$(git remote get-url origin 2>/dev/null)
+if [ -n "${SNYK_ORG:-}" ]; then
+  # The counter filename gets a sanitised copy, so a slash cannot escape the dir.
+  ORG=$(printf '%s' "$SNYK_ORG" | tr -c 'A-Za-z0-9._-' '_'); ORG_OPT="--org=$SNYK_ORG"
+else
+  ORG=default; ORG_OPT=""
+fi
+OS_CAP=${SNYK_HOOK_OS_CAP:-180}
+CODE_CAP=${SNYK_HOOK_CODE_CAP:-90}
+SEVERITY=${SNYK_HOOK_SEVERITY:-high}
+FAIL=0
+
+# Extract only the dependency maps of a package.json on stdin, as canonical JSON
+# with sorted keys, so reordering a map is not a dependency change.
+DEPS_JS='let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(s);const k=["dependencies","devDependencies","optionalDependencies","peerDependencies","overrides","resolutions","bundledDependencies"];const sorted=o=>(o&&typeof o==="object"&&!Array.isArray(o))?Object.fromEntries(Object.keys(o).sort().map(x=>[x,sorted(o[x])])):o;const o={};for(const x of k)if(p[x]!==undefined)o[x]=sorted(p[x]);process.stdout.write(JSON.stringify(o))}catch(e){process.stdout.write("ERR")}})'
+# A package-lock.json minus its root version fields: any other difference means
+# the resolved dependency tree changed (npm update, npm audit fix, a transitive bump).
+LOCK_JS='let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(s);delete p.version;if(p.packages&&p.packages[""])delete p.packages[""].version;process.stdout.write(JSON.stringify(p))}catch(e){process.stdout.write("ERR")}})'
+
+# Hash of a blob (HEAD:path, or :path for the index) after a node filter.
+filtered_hash() { # filtered_hash <rev:path> <js>
+  git show "$1" 2>/dev/null | node -e "$2" | git hash-object --stdin
+}
+
+# Did the staged version of a manifest, or its lockfile, change the resolved
+# dependencies vs HEAD? A new manifest or lockfile counts as changed.
+#   package.json      compare the dependency maps (keys sorted).
+#   package-lock.json compare everything except the root version fields.
+#   other lockfiles   any staged change.
+#   other manifests   any staged line that is not a bare version line
+#                     (a line starting with '-' such as `-r extra.txt` counts).
+deps_changed() { # deps_changed <manifest path relative to TOP>
+  _m=$1
+  _d=$(dirname "$_m")
+  git cat-file -e "HEAD:$_m" 2>/dev/null || return 0
+  # Lockfiles first: a lockfile-only commit (npm update, npm audit fix) is a
+  # dependency change even though the manifest constraints did not move.
+  for _l in package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml poetry.lock Pipfile.lock uv.lock Gemfile.lock composer.lock go.sum; do
+    _lp="$_d/$_l"; case "$_lp" in ./*) _lp=${_lp#./} ;; esac
+    git diff --cached --name-only -- "$_lp" | grep -q . || continue
+    git cat-file -e "HEAD:$_lp" 2>/dev/null || return 0
+    case "$_l" in
+      package-lock.json|npm-shrinkwrap.json)
+        command -v node >/dev/null 2>&1 || return 0
+        [ "$(filtered_hash "HEAD:$_lp" "$LOCK_JS")" != "$(filtered_hash ":$_lp" "$LOCK_JS")" ] && return 0 ;;
+      *) return 0 ;;
+    esac
+  done
+  case "$(basename "$_m")" in
+    package.json)
+      command -v node >/dev/null 2>&1 || return 0
+      _head=$(git show "HEAD:$_m" 2>/dev/null | node -e "$DEPS_JS")
+      _idx=$(git show ":$_m" 2>/dev/null | node -e "$DEPS_JS")
+      [ "$_head" = ERR ] && return 0
+      [ "$_head" != "$_idx" ] ;;
+    *)
+      git diff --cached -U0 -- "$_m" | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' | grep -vE '^[+-][[:space:]]*"?version"?[[:space:]]*[:=]' | grep -q . ;;
+  esac
+}
+
+# Staged additions and modifications, one raw path per line. NUL-delimited
+# (-z) because git's default core.quotePath=true wraps any non-ASCII path in
+# double quotes ("caf\303\251/package.json"), and the trailing quote then
+# defeats every basename and extension match below.
+staged_files() {
+  git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n'
+}
+
+# Is a file Snyk Code analyzes among the staged additions and modifications?
+# Docs, data, and config (.md, .json, .yml, .toml, lockfiles) are not, so a
+# docs-only commit spends no metered Code test. Deletions do not count:
+# removing code cannot add an issue. Extensions are matched case-insensitively.
+# The hook is global, so the list covers the languages and server-side
+# templates Snyk Code analyzes, not only the ones these repos use. When in
+# doubt, add an extension: a spent test is cheaper than a missed scan.
+# Exit 0: source staged. Exit 1: definitely none. Anything else: unknown.
+code_staged() {
+  staged_files \
+    | tr '[:upper:]' '[:lower:]' \
+    | grep -qE '\.(js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|ejs|html|htm|py|java|jsp|jspx|kt|kts|go|rb|erb|php|phtml|cs|cshtml|aspx|vb|c|cc|cpp|cxx|h|hh|hpp|hxx|m|swift|scala|groovy|rs|ex|exs|cls|trigger)$'
+}
+
+# ---- 1. Open Source: staged manifests whose dependencies changed ---------
+# Map each staged file to the manifest Snyk tests. Skip vendored and generated trees.
+MANIFESTS=$(staged_files | while IFS= read -r f; do
+  case "$f" in
+    */node_modules/*|node_modules/*|*/.venv/*|.venv/*|*/generated/*|*/dist/*|dist/*) continue ;;
+  esac
+  d=$(dirname "$f"); b=$(basename "$f")
+  case "$b" in
+    package.json|requirements.txt|requirements-*.txt|requirements_*.txt|Pipfile|go.mod|Gemfile|pom.xml|build.gradle|build.gradle.kts|composer.json)
+      echo "$f" ;;
+    package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml) [ -f "$d/package.json" ] && echo "$d/package.json" ;;
+    Pipfile.lock) [ -f "$d/Pipfile" ] && echo "$d/Pipfile" ;;
+    poetry.lock) [ -f "$d/pyproject.toml" ] && echo "$d/pyproject.toml" ;;
+    # uv.lock is deliberately not mapped: Snyk has no uv support and would test
+    # pyproject.toml as Poetry (exit 3). osv-scanner in CI covers uv.lock.
+    pyproject.toml) [ -f "$d/poetry.lock" ] && echo "$f" ;;
+    Gemfile.lock) [ -f "$d/Gemfile" ] && echo "$d/Gemfile" ;;
+    composer.lock) [ -f "$d/composer.json" ] && echo "$d/composer.json" ;;
+    go.sum) [ -f "$d/go.mod" ] && echo "$d/go.mod" ;;
+  esac
+done | sed 's#^\./##' | sort -u)  # root lockfile maps to "./package.json"; dedupe with "package.json"
+
+if [ -n "$MANIFESTS" ]; then
+  printf '%s\n' "$MANIFESTS" | while IFS= read -r m; do
+    if ! deps_changed "$m"; then
+      log "$m staged but neither its dependency fields nor its lockfile's resolved tree changed; not tested"
+      continue
+    fi
+    used=$(usage_get "$ORG" os)
+    if [ "$used" -ge "$OS_CAP" ]; then
+      log "Open Source soft cap reached ($used/$OS_CAP this month, org $ORG); $m NOT tested"
+      continue
+    fi
+    # Skip a manifest that has no non-comment, non-blank lines (Snyk rejects it as empty).
+    if ! grep -Eq '^[[:space:]]*[^[:space:]#]' "$TOP/$m"; then
+      log "$m is empty, skipped"
+      continue
+    fi
+    # Python manifests: Snyk reads the versions installed in the Python it runs,
+    # not the pins in the manifest, so testing against the host's packages
+    # reports on the wrong versions. Installing into a throwaway venv fixes the
+    # accuracy -- at a price.
+    #
+    # THE PRICE, and why this is opt-in: `pip install -r` BUILDS packages, and a
+    # source distribution's build runs arbitrary code (setup.py, a PEP 517
+    # backend) as you, with your files and credentials in reach. A requirements
+    # file can also point at a local path or a VCS URL. Wiring that to
+    # `git commit` means editing one line of a manifest executes someone else's
+    # build code -- not a thing a secret-scanning hook should do by surprise,
+    # and a temp venv isolates the installed packages, not the build.
+    #
+    # So: off by default. Snyk still tests the manifest against whatever Python
+    # it finds, which is less accurate and harmless. Opt in per commit, or per
+    # repo once you trust its manifests:
+    #   SNYK_HOOK_PIP_INSTALL=1 git commit ...
+    #   git config --local hook.snykPipInstall 1
+    # Snyk shells out to `python`; WSL only has python3. Unresolved packages are skipped.
+    EXTRA=""
+    VENV=""
+    # `-`, not `:-`: an EMPTY value means "off" and must not fall through to
+    # the git setting. With `:-`, `SNYK_HOOK_PIP_INSTALL= git commit` in a repo
+    # with hook.snykPipInstall=1 ran the build anyway -- the opposite of what
+    # the empty switch says, and the opposite of the documented precedence.
+    # `--local`, so the setting cannot be turned on globally: a global
+    # hook.snykPipInstall=1 would otherwise run package builds in EVERY repo,
+    # while the docs promise a per-repository opt-in. Plain `--get` reads
+    # local, then global, then system.
+    PIP_OK=${SNYK_HOOK_PIP_INSTALL-$(git config --local --get hook.snykPipInstall 2>/dev/null)}
+    case "$(basename "$m")" in
+      requirements*.txt|Pipfile|pyproject.toml)
+        EXTRA="--skip-unresolved=true"
+        PYBIN=python
+        if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+          PYBIN=python3
+        fi
+        case "$(basename "$m")" in
+          requirements*.txt)
+            if [ "${PIP_OK:-0}" != 1 ]; then
+              log "$m: not installing it to test it (a package build runs arbitrary code); testing against host packages. SNYK_HOOK_PIP_INSTALL=1 to opt in"
+            else
+            VENV=$(mktemp -d 2>/dev/null)
+            if [ -n "$VENV" ] && "$PYBIN" -m venv "$VENV" >/dev/null 2>&1; then
+              VPY="$VENV/bin/python"; [ -x "$VPY" ] || VPY="$VENV/Scripts/python.exe"
+              if ( cd "$TOP/$(dirname "$m")" && "$VPY" -m pip install -q --disable-pip-version-check -r "$(basename "$m")" >/dev/null 2>&1 ); then
+                PYBIN="$VPY"
+              else
+                log "$m: pip install into a temp venv failed; testing against host packages"
+              fi
+            else
+              log "$m: could not create a temp venv; testing against host packages"
+            fi
+            fi ;;
+        esac
+        [ "$PYBIN" = python ] || EXTRA="$EXTRA --command=$PYBIN" ;;
+    esac
+    log "Open Source test: $m (org $ORG, $((used + 1))/$OS_CAP this month)"
+    # KNOWN GAP, recorded rather than fixed. `deps_changed` reads the INDEX to
+    # decide whether to test, and this tests the WORKING TREE -- so after a
+    # partial stage it can scan a safe copy on disk while you commit a
+    # vulnerable one. Closing it means materialising the staged manifests and
+    # their lockfiles into a temp tree, which breaks on workspaces, local path
+    # dependencies and monorepo roots, for a narrow win: CI scans the merge
+    # commit, so a divergent commit is caught before it merges. This is a
+    # recorded verdict, not an oversight.
+    ( cd "$TOP/$(dirname "$m")" && snyk test --file="$(basename "$m")" $ORG_OPT $EXTRA --severity-threshold="$SEVERITY" --fail-on=all )
+    rc=$?
+    [ -n "$VENV" ] && rm -rf "$VENV"
+    [ "$rc" = 3 ] || usage_inc "$ORG" os   # exit 3 = no supported project: no test ran, nothing to count
+    case $rc in
+      0) ;;
+      1) log "$m has $SEVERITY+ vulnerabilities WITH A FIX AVAILABLE"; echo "$m" >> "$GIT_DIR_PATH/snyk-hook-failed" ;;
+      3) log "$m: no supported project found, skipped" ;;
+      *) log "$m: snyk error (exit $rc), not blocking" ;;
+    esac
+  done
+  if [ -f "$GIT_DIR_PATH/snyk-hook-failed" ]; then
+    rm -f "$GIT_DIR_PATH/snyk-hook-failed"
+    FAIL=1
+  fi
+fi
+
+# ---- 2. Snyk Code: once per repo per day, only when source is staged -----
+STAMP="$GIT_DIR_PATH/snyk-code-stamp"
+TODAY=$(date +%Y-%m-%d)
+LAST_RAW=$(cat "$STAMP" 2>/dev/null)
+LAST=${LAST_RAW%%:*}
+LAST_VERDICT=${LAST_RAW#*:}
+FORCE=${SNYK_CODE_FORCE:-0}
+code_staged; HAS_CODE=$?   # 0 source staged, 1 none, other: could not tell -> run
+if [ "$FORCE" != 1 ] && [ "$HAS_CODE" = 1 ]; then
+  # Nothing Snyk Code analyzes is staged. Do not stamp: a source commit later
+  # today must still get its test.
+  log "no source files staged; Snyk Code not run"
+elif [ "$FORCE" != 1 ] && [ "$LAST" = "$TODAY" ]; then
+  # Re-assert the day's verdict. Carrying only the date lost a block: a finding
+  # stamped the day, the retry an hour later took the once-a-day skip, and FAIL
+  # started at 0 again -- so in block mode the second attempt at the same commit
+  # sailed through with the finding unfixed. The `!=` guards the no-colon case,
+  # where ${LAST_RAW#*:} returns the whole string.
+  if [ "$LAST_RAW" != "$LAST_VERDICT" ] && [ "$LAST_VERDICT" = fail ]; then
+    log "Snyk Code already ran today and found $SEVERITY+ issues; that verdict still stands (SNYK_CODE_FORCE=1 to re-scan)"
+    FAIL=1
+  fi
+else
+  # A new day, or a forced retry. Today's saved failure stays IN FORCE until a
+  # completed scan replaces it: neither the cap branch nor the scan-error branch
+  # below produces a verdict, and dropping the saved one there would let block
+  # mode pass a commit whose finding still stands. SNYK_CODE_FORCE=1 reached
+  # exactly that hole -- it skips the re-assert above and then, on a capped or
+  # errored scan, left FAIL at 0.
+  # Tracked separately from FAIL so that clearing the Code verdict cannot clear
+  # an Open Source failure from section 1.
+  CODE_FAIL=0
+  if [ "$LAST" = "$TODAY" ] && [ "$LAST_RAW" != "$LAST_VERDICT" ] && [ "$LAST_VERDICT" = fail ]; then
+    CODE_FAIL=1
+    log "today's Snyk Code verdict was a failure; it stands unless this scan completes"
+  fi
+  used=$(usage_get "$ORG" code)
+  if [ "$used" -ge "$CODE_CAP" ]; then
+    log "Code soft cap reached ($used/$CODE_CAP this month, org $ORG); Code test NOT run"
+  else
+    log "Snyk Code test (org $ORG, $((used + 1))/$CODE_CAP this month)"
+    REPO_URL_OPT=""; [ -n "$REMOTE" ] && REPO_URL_OPT="--remote-repo-url=$REMOTE"
+    ( cd "$TOP" && snyk code test $ORG_OPT $REPO_URL_OPT --severity-threshold="$SEVERITY" )
+    rc=$?
+    usage_inc "$ORG" code
+    case $rc in
+      0) echo "$TODAY" > "$STAMP"; CODE_FAIL=0 ;;
+      1) echo "$TODAY:fail" > "$STAMP"; log "Snyk Code found $SEVERITY+ issues"; CODE_FAIL=1 ;;
+      3) echo "$TODAY" > "$STAMP"; log "Snyk Code: no supported files, skipped"; CODE_FAIL=0 ;;
+      *) log "Snyk Code error (exit $rc), not blocking" ;;
+    esac
+  fi
+  [ "$CODE_FAIL" -eq 0 ] || FAIL=1
+fi
+
+if [ "$FAIL" -ne 0 ]; then
+  if [ "$MODE" = block ]; then
+    log "commit blocked. Apply the available fix, or add a .snyk ignore with a reason and an expiry"
+    exit 1
+  fi
+  log "findings above have fixes available; reported only (SNYK_HOOK_MODE=$MODE). Remediation-wins rule: open the fix PR the same day -- a warn is an obligation, not a grace period"
+fi
+exit 0

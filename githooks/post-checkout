@@ -1,0 +1,5 @@
+#!/bin/sh
+# Global post-checkout hook: no logic of its own. Chains to the repo-local .git/hooks/post-checkout if present.
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$HOOK_DIR/_lib.sh"
+chain_local_hook post-checkout "$@"
