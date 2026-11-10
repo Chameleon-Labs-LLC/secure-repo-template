@@ -5,7 +5,7 @@
 # cases use SNYK_HOOK_MODE=off, and the end-to-end cases put a stub `snyk`
 # first on PATH. Needs git, node, and gitleaks on PATH.
 #
-#   sh githooks/test-pre-commit.sh
+#   sh Scripts/githooks/test-pre-commit.sh
 #
 # Exit 0 when every case passes, 1 otherwise. Add a case here before changing
 # deps_changed(), staged_files(), or code_staged().

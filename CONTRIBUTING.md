@@ -12,18 +12,18 @@ Open an issue. Say what you expected, what happened, and how to reproduce it. Fo
 2. Install gitleaks and the hooks ([docs/security-setup.md, step 2](docs/security-setup.md#2-pre-commit-hook-gitleaks-fails-closed)):
 
    ```bash
-   sh githooks/install.sh --repo
+   git config core.hooksPath Scripts/githooks
    ```
 
 3. Make your change. Keep each pull request to one topic.
-4. If you changed anything under `githooks/`, run the test suite and shellcheck:
+4. If you changed anything under `Scripts/githooks/`, run the test suite and shellcheck:
 
    ```bash
-   sh githooks/test-pre-commit.sh
+   sh Scripts/githooks/test-pre-commit.sh
    ```
 
    ```bash
-   shellcheck -s sh -x --severity=warning githooks/_lib.sh githooks/install.sh githooks/pre-commit githooks/test-pre-commit.sh
+   shellcheck -s sh -x --severity=warning Scripts/githooks/_lib.sh Scripts/githooks/install.sh Scripts/githooks/pre-commit Scripts/githooks/test-pre-commit.sh
    ```
 
 5. Open a pull request against `main` and describe what changed and why.

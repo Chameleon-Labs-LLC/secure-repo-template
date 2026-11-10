@@ -15,8 +15,8 @@ dist/
 build/
 coverage/
 
-# Usage counters the pre-commit hook writes when installed with --repo
-githooks/usage/
+# Usage counters the pre-commit hook writes when used per repo (core.hooksPath Scripts/githooks)
+Scripts/githooks/usage/
 
 # Editors and OS
 .vscode/

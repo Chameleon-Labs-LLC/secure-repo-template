@@ -1,8 +1,8 @@
 #!/bin/sh
 # pre-commit hook: secret scan, then delta-aware dependency checks.
-# Install: sh githooks/install.sh (all repos) or sh githooks/install.sh --repo.
+# Install: sh Scripts/githooks/install.sh (all repos) or sh Scripts/githooks/install.sh --repo.
 # Guide: docs/security-setup.md.
-# Self-test (no Snyk quota spent): sh githooks/test-pre-commit.sh
+# Self-test (no Snyk quota spent): sh Scripts/githooks/test-pre-commit.sh
 #
 # Order:
 #   0. gitleaks on the staged diff. Always runs, ~1 s, free, and FAILS CLOSED:

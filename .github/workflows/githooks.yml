@@ -64,7 +64,7 @@ jobs:
       # silently skipping cases. It spends no Snyk quota: the cases either set
       # SNYK_HOOK_MODE=off or put a stub `snyk` first on PATH.
       - name: Run the hook test suite
-        run: sh githooks/test-pre-commit.sh
+        run: sh Scripts/githooks/test-pre-commit.sh
 
   shellcheck:
     name: shellcheck
@@ -103,7 +103,7 @@ jobs:
         run: |
           set -eu
           files=""
-          for f in githooks/*; do
+          for f in Scripts/githooks/*; do
             [ -f "$f" ] || continue
             if head -1 "$f" | grep -qE '^#!.*\b(sh|bash|dash)\b'; then
               files="$files $f"

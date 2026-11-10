@@ -22,7 +22,7 @@ Prices change. Check each vendor's pricing page before you rely on a number here
 
 **New repo:** on the template's GitHub page, click **Use this template → Create a new repository**.
 
-**Existing repo:** copy these paths into it: `githooks/`, `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.gitattributes`, `.gitleaksignore`, and, if you'll use them, `.coderabbit.yaml` and `.greptile/config.json`. If you already have a `.nvmrc`, keep yours; the workflows read it. Merge `.gitignore` by hand.
+**Existing repo:** copy these paths into it: `Scripts/githooks/`, `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.gitattributes`, `.gitleaksignore`, and, if you'll use them, `.coderabbit.yaml` and `.greptile/config.json`. If you already have a `.nvmrc`, keep yours; the workflows read it. Merge `.gitignore` by hand.
 
 A template copies **files only**. Repository settings, rulesets and installed apps do not come along. Steps 3, 4 and 6 cover the ones that matter.
 
@@ -30,7 +30,7 @@ A template copies **files only**. Repository settings, rulesets and installed ap
 
 ## 2. Pre-commit hook: gitleaks, fails closed
 
-`githooks/pre-commit` scans every commit's staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before the commit is made. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
+`Scripts/githooks/pre-commit` scans every commit's staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before the commit is made. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
 
 It **fails closed**:
 
@@ -59,19 +59,25 @@ winget install --id Gitleaks.Gitleaks --scope user
 
 **Install the hooks.** Pick one.
 
-For this repository only (points its `core.hooksPath` at `githooks/`; edits to the hooks apply at once):
+For this repository only (edits to the hooks apply at once; `sh Scripts/githooks/install.sh --repo` does the same thing):
 
 ```bash
-sh githooks/install.sh --repo
+git config core.hooksPath Scripts/githooks
 ```
 
-For every repository on this machine (copies the hooks to `~/.githooks` and sets the global `core.hooksPath`; re-run after you change a hook). Set `GITHUB_ROOT=<dir>` to install to `<dir>/.githooks` instead:
+For every repository on this machine (copies the hooks to `~/.githooks` and sets the global `core.hooksPath` there; re-run it after you edit a hook):
 
 ```bash
-sh githooks/install.sh
+sh Scripts/githooks/install.sh
 ```
 
-WSL and Git Bash each have their own git and global config, so run the global install once in each one you commit from. If a global `core.hooksPath` is already set, the installer stops and prints it; add `--force` to replace it.
+To install somewhere else, override the root. The hooks go to `<root>/.githooks`:
+
+```bash
+GITHUB_ROOT="$HOME/somewhere" sh Scripts/githooks/install.sh
+```
+
+WSL and Git Bash each have their own git and global config, so run the global install once in each one you commit from. If a global `core.hooksPath` already points somewhere else, the installer stops and prints it rather than replacing it; add `--force` to replace it.
 
 Two things to know:
 
@@ -91,10 +97,10 @@ Two things to know:
 **Test the hook** (needs `git` 2.36+, `node` and `gitleaks`; spends no Snyk quota):
 
 ```bash
-sh githooks/test-pre-commit.sh
+sh Scripts/githooks/test-pre-commit.sh
 ```
 
-**Undo:** `sh githooks/install.sh --uninstall --repo` or `sh githooks/install.sh --uninstall`.
+**Undo:** for a single repo, `git config --unset core.hooksPath`. For the global install, `git config --global --unset core.hooksPath`. (`install.sh --uninstall`, with or without `--repo`, does the same and checks it is removing its own setting.)
 
 ## 3. CI security workflow
 

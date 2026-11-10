@@ -1,21 +1,24 @@
 #!/bin/sh
 # Install the git hooks in this directory.
 #
-#   sh githooks/install.sh               every repo you own on this machine:
-#                                        copies the hooks to ~/.githooks and sets
-#                                        the GLOBAL core.hooksPath to it
-#   sh githooks/install.sh --repo        this repository only: sets its LOCAL
-#                                        core.hooksPath to githooks/ (no copy)
-#   sh githooks/install.sh --uninstall   undo the global install
-#   sh githooks/install.sh --uninstall --repo   undo the per-repo install
+#   sh Scripts/githooks/install.sh
+#       Every repo on this machine: copies the hooks to ~/.githooks and sets
+#       the GLOBAL core.hooksPath there.
+#   sh Scripts/githooks/install.sh --repo
+#       This repository only: sets its LOCAL core.hooksPath to
+#       Scripts/githooks (no copy). Same as
+#       `git config core.hooksPath Scripts/githooks`.
+#   sh Scripts/githooks/install.sh --uninstall [--repo]
+#       Undo. Same as `git config [--global] --unset core.hooksPath`, but
+#       refuses to remove a global setting that is not this install's.
 #
 # Options:
 #   --force          replace a global core.hooksPath that points somewhere else
 #   GITHUB_ROOT=dir  install to <dir>/.githooks instead of ~/.githooks
 #
 # Supported: Linux, WSL, and Git Bash on Windows. WSL and Git Bash each have
-# their own git and their own global config, so run the global install once in
-# each environment you commit from.
+# their own git and global config, so run the global install once in each
+# environment you commit from.
 #
 # Re-run after editing a hook (global mode copies files). Idempotent.
 set -eu
@@ -29,7 +32,7 @@ for arg in "$@"; do
     --repo) MODE=repo ;;
     --uninstall) ACTION=uninstall ;;
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
   esac
 done

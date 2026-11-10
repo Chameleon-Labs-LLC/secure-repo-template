@@ -111,7 +111,7 @@ reviews:
         Report only:
           - A rule here that contradicts the same rule stated in another file in
             this repo, or that contradicts what the repo's own config actually
-            does (.github/**, githooks/**, .greptile/config.json,
+            does (.github/**, Scripts/githooks/**, .greptile/config.json,
             .coderabbit.yaml, .npmrc). Name both sides. Check files outside the
             diff: this is the defect a diff-scoped reviewer is most likely to
             miss.
