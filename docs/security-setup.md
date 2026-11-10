@@ -73,13 +73,13 @@ winget install --id Gitleaks.Gitleaks --scope user
 
 **Install the hooks.** Pick one.
 
-For this repository only (edits to the hooks apply at once). First check that nothing else owns the setting; this should print nothing:
+For this repository only (edits to the hooks apply at once). First check that nothing else owns this repo's setting; this should print nothing:
 
 ```bash
-git config --get core.hooksPath
+git config --local --get core.hooksPath
 ```
 
-If it prints a path (Husky's `.husky`, for example), setting it below would switch those hooks off. Then:
+Keep `--local`: without it, git also reads your global config and prints a global hooks path even when the repo has none. If it prints a path (Husky's `.husky`, for example), setting it below would switch those hooks off. Then:
 
 ```bash
 git config core.hooksPath Scripts/githooks
