@@ -114,13 +114,20 @@ jobs:
           # merge-commit patches: a secret added while resolving a merge
           # conflict would go unscanned. Every path below therefore asks for
           # first-parent merge diffs, and the full-history paths restate the
-          # defaults rather than losing them.
+          # defaults rather than losing them, with one deliberate change: no `t`.
+          # In --diff-filter a LOWERCASE letter EXCLUDES that change type, so
+          # gitleaks' default `tuxdb` skips type changes. A symlink replaced by a
+          # regular file holding a secret is a type change (T), and the full
+          # scan never read it. Measured with gitleaks 8.30.1: `tuxdb` reported
+          # "no leaks found" on such a commit, `uxdb` reported the leaks. The
+          # pull_request and push ranges pass no --diff-filter, so git's
+          # default already includes T there.
           # --text is LOAD-BEARING. Without it a PR can add `path -diff` to
           # .gitattributes, git prints "Binary files differ" instead of the
           # patch, and gitleaks scans nothing while reporting "no leaks found".
           # Do not remove --text.
           DIFFOPTS="--diff-merges=first-parent --text"
-          FULL="--full-history --all --diff-filter=tuxdb $DIFFOPTS"
+          FULL="--full-history --all --diff-filter=uxdb $DIFFOPTS"
           case "$GITHUB_EVENT_NAME" in
             pull_request) OPTS="$BASE..$HEAD $DIFFOPTS" ;;
             push)
