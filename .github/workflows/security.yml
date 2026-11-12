@@ -374,7 +374,7 @@ jobs:
       # that no tag of the action's repository points at cannot be matched to
       # any advisory, so it would pass that audit unchecked (unpinned-uses and
       # impostor-commit both accept it). So every SHA pin of an external action
-      # must be a commit that one of its repository's tags points at. Runs even
+      # must be a commit that one of its repository's RELEASE tags points at. Runs even
       # when the zizmor step failed, so both results show.
       - name: Every action SHA pin is a tagged release
         if: ${{ !cancelled() }}
@@ -478,11 +478,15 @@ jobs:
                           peeled[name_[:-3]] = oid
                       else:
                           direct[name_] = oid
-                  tags[key] = {peeled.get(n_, oid) for n_, oid in direct.items()}
+                  # Only RELEASE tags count (v1, v1.2, 1.2.3, v2.0.0-rc.1):
+                  # zizmor matches advisories by the tag name, so a commit whose
+                  # only tag is, say, `scratch` would match no version range.
+                  release = re.compile(r"refs/tags/v?\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?")
+                  tags[key] = {peeled.get(n_, oid) for n_, oid in direct.items() if release.fullmatch(n_)}
               if sha not in tags[key]:
                   for p in where:
                       bad += 1
-                      print(f"::error file={esc(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a commit any tag of {esc(owner)}/{esc(repo)} points at, so no advisory can be matched to it. Pin the SHA of a released version.")
+                      print(f"::error file={esc(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a commit any release tag (vX.Y.Z) of {esc(owner)}/{esc(repo)} points at, so no advisory can be matched to it. Pin the SHA of a released version.")
           print(f"action pins: {len(pins)} distinct SHA pins checked, {bad} not a tagged release")
           sys.exit(1 if bad else 0)
           PY
