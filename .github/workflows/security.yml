@@ -677,7 +677,9 @@ jobs:
       # silently. The next step lists those, so they are at least visible.
       - name: Registry packages have verified signatures
         if: steps.lock.outputs.present == 'true'
-        run: npm audit signatures
+        # --include: verify every installed dependency type, whatever `omit`
+        # the trusted .npmrc sets (the listing below assumes all are checked).
+        run: npm audit signatures --include=dev --include=optional --include=peer
       # A locked dependency counts as covered only when it resolves to a .tgz
       # under the configured registry (registry.npmjs.org unless the trusted
       # .npmrc says otherwise) and has an integrity hash. Any other https host
