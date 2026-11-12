@@ -312,6 +312,8 @@ jobs:
       # it could add a zizmor.yml that disables an audit, or a
       # `# zizmor: ignore[...]` comment. Neither is honoured.
       # --collect=all: also audit workflows a PR hides with .gitignore.
+      # --strict-collection: a collected file zizmor cannot parse fails the
+      # scan instead of being skipped with a warning.
       # --no-exit-codes: exit 0 means the scan ran, anything else is a scanner
       # error; the JSON decides whether there are findings.
       - name: zizmor (known-vulnerable, impostor and unpinned actions)
@@ -325,7 +327,7 @@ jobs:
           fi
           out="$RUNNER_TEMP/zizmor.json"
           rc=0
-          zizmor --format json --no-progress --no-exit-codes \
+          zizmor --format json --no-progress --no-exit-codes --strict-collection \
             --no-config --no-ignores --collect=all . > "$out" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error title=zizmor::scanner error, exit $rc (not a findings result)"
