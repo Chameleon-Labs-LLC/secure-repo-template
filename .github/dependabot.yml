@@ -53,7 +53,9 @@ updates:
     # NOT for SHA pins, so no security update can ever fire for a pinned
     # action. The weekly VERSION update is the only automatic remediation, and
     # ignoring majors would remove it. Advisory DETECTION for actions comes
-    # from the `github/actions` osv-scanner plugin in security.yml.
+    # from the zizmor job in security.yml (known-vulnerable-actions). The
+    # osv-scanner `github/actions` plugin does NOT detect them: it lists the
+    # references and matched no advisory in our tests.
 
   # --- npm: uncomment when the repo has a package.json --------------------
   # - package-ecosystem: npm

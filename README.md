@@ -13,7 +13,7 @@ Everything in the core setup is free. The optional parts (Snyk, Greptile, and Co
 | `Scripts/githooks/pre-commit` | Runs gitleaks on staged changes and **fails closed**: a found secret blocks the commit, and so does a missing or broken scanner. Optional Snyk checks: Open Source only when a dependency actually changed, Code at most once a day when source files are staged. | Free (Snyk optional, metered) |
 | `Scripts/githooks/install.sh` | Installs the hooks for all your repos (`~/.githooks`) or for one repo. | Free |
 | `Scripts/githooks/test-pre-commit.sh` | Self-test for the hook, run in CI. | Free |
-| `.github/workflows/security.yml` | gitleaks, osv-scanner, `npm audit` and `npm audit signatures` on every PR, every push to `main`, and weekly. | Free |
+| `.github/workflows/security.yml` | gitleaks, osv-scanner, zizmor (advisories against the actions you use), `npm audit` and `npm audit signatures` on every PR, every push to `main`, and weekly. | Free |
 | `.github/workflows/githooks.yml` | Runs the hook tests and shellcheck. | Free |
 | `.github/dependabot.yml` | Grouped updates with a 7-day cooldown. GitHub Actions on; npm and pip ready to uncomment. | Free |
 | `.npmrc` | `min-release-age=7`: npm refuses package versions younger than a week. | Free |

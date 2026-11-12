@@ -42,6 +42,15 @@ jobs:
           # thing the scripts under test could read.
           persist-credentials: false
 
+      # setup-node reads the Node version from .nvmrc and, without one, fails
+      # with an error that does not say what is missing.
+      - name: Check for .nvmrc
+        run: |
+          if [ ! -f .nvmrc ]; then
+            echo "::error file=.nvmrc,title=hook test suite::.nvmrc is missing at the repo root. This job reads the Node version from it; commit one with an LTS major, e.g. 'echo 24 > .nvmrc'"
+            exit 1
+          fi
+
       # The dependency-delta cases parse package.json with a real `node`.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
