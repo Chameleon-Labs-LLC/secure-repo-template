@@ -203,7 +203,10 @@ jobs:
             echo "no pyproject.toml at the repo root; nothing to list"
             exit 0
           fi
-          python3 - "$RUNNER_TEMP/pyproject-requirements.txt" <<'PY'
+          # -I (isolated mode): the working directory is the PR's checkout, and
+          # without it a PR-added tomllib.py would be imported in place of the
+          # standard library and could hide dependencies from the scan.
+          python3 -I - "$RUNNER_TEMP/pyproject-requirements.txt" <<'PY'
           import sys, tomllib
           with open("pyproject.toml", "rb") as fh:
               data = tomllib.load(fh)
@@ -328,7 +331,10 @@ jobs:
             echo "::error title=zizmor::scanner error, exit $rc (not a findings result)"
             exit 2
           fi
-          python3 - "$out" <<'PY'
+          # -I (isolated mode): the working directory is the PR's checkout, and
+          # without it a PR-added json.py would be imported in place of the
+          # standard library and could report no findings.
+          python3 -I - "$out" <<'PY'
           import json, sys
           GATED = {"known-vulnerable-actions", "impostor-commit", "unpinned-uses"}
           try:
