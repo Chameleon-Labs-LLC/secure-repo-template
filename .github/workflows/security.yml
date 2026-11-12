@@ -420,11 +420,15 @@ jobs:
               dirs[:] = [d for d in dirs if d != ".git"]
               for n in names:
                   p = os.path.join(root, n)[2:]
-                  if os.path.islink(p):
-                      continue
                   in_wf = p.replace(os.sep, "/").startswith(".github/workflows/") and n.endswith((".yml", ".yaml"))
-                  if in_wf or n in ("action.yml", "action.yaml"):
-                      files.append(p)
+                  if not (in_wf or n in ("action.yml", "action.yaml")):
+                      continue
+                  if os.path.islink(p):
+                      # Not followed (it could point outside the checkout), so
+                      # its pins cannot be checked: fail closed.
+                      print(f"::error file={esc(p)},title=action pins::{esc(p)} is a symlink; workflow and action manifests must be regular files to be checked")
+                      sys.exit(1)
+                  files.append(p)
           pins = {}  # (owner, repo, sha) -> [file]
           for p in sorted(files):
               try:
@@ -740,23 +744,31 @@ jobs:
               if (/^(\.{1,2}(\/|$)|~\/|\/)/.test(s)) return false; // local path (a leading ~ alone is a semver range)
               return true;
             };
-            const specs = {};
+            // edges[path]: one entry per dependent that declares this package,
+            // holding every spec that dependent gives the name (dependencies,
+            // optional, peer, and dev for the root and workspace packages).
+            // An edge counts as a registry edge only when ALL of its specs are
+            // registry specs, and only dependents actually present here count,
+            // so an absent optional package cannot vouch for anything.
+            const edges = {};
             for (const [from, q] of Object.entries(pkgs)) {
               if (!q) continue;
+              const local = !from.includes("node_modules/");
+              if (!local && !fs.existsSync(from)) continue;
               const groups = [q.dependencies, q.optionalDependencies, q.peerDependencies];
-              // devDependencies install for the root and for workspace packages
-              // (entries outside node_modules), not for installed packages.
-              if (!from.includes("node_modules/")) groups.push(q.devDependencies);
+              if (local) groups.push(q.devDependencies);
+              const byName = {};
               for (const g of groups) {
-                for (const [name, spec] of Object.entries(g || {})) {
-                  let base = from;
-                  for (;;) {
-                    const cand = (base ? base + "/" : "") + "node_modules/" + name;
-                    if (pkgs[cand]) { (specs[cand] = specs[cand] || []).push(spec); break; }
-                    if (!base) break;
-                    const i = base.lastIndexOf("/node_modules/");
-                    base = i < 0 ? "" : base.slice(0, i);
-                  }
+                for (const [name, spec] of Object.entries(g || {})) (byName[name] = byName[name] || []).push(spec);
+              }
+              for (const [name, list] of Object.entries(byName)) {
+                let base = from;
+                for (;;) {
+                  const cand = (base ? base + "/" : "") + "node_modules/" + name;
+                  if (pkgs[cand]) { (edges[cand] = edges[cand] || []).push(list); break; }
+                  if (!base) break;
+                  const i = base.lastIndexOf("/node_modules/");
+                  base = i < 0 ? "" : base.slice(0, i);
                 }
               }
             }
@@ -781,9 +793,9 @@ jobs:
                 // not install here (an optional package for another platform)
                 // was not verified on this runner.
                 absent.push(path);
-              } else if (!(specs[path] || []).length || !(specs[path] || []).some(isRegistrySpec)) {
+              } else if (!(edges[path] || []).some((list) => list.every(isRegistrySpec))) {
                 notRegistrySpec++;
-                const declared = (specs[path] || []).filter((s) => !isRegistrySpec(s));
+                const declared = [].concat(...(edges[path] || [])).filter((s) => !isRegistrySpec(s));
                 const why = declared.length ? `is declared as ${esc(declared.join(", "))}, not a registry version or range` : "is not declared by any dependent in the lockfile";
                 console.log(`::warning title=${T}::${esc(path)} ${why}, so npm audit signatures does not verify it`);
               } else {
