@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The action-advisory step reports an exhausted `GITHUB_TOKEN` rate limit (HTTP 403 or 429 with no quota left) with its own message instead of a generic HTTP error. The check still fails. Raised by CodeRabbit on lelandg/command-center#5.
 - `npm audit signatures` retries when the registry answers without a signing key (`EMISSINGSIGNATUREKEY`): up to 3 attempts, 15 s apart, with `--prefer-online` on the retries. Any other failure, including an invalid signature, fails on the first attempt. Ported from ChameleonLabs #465.
 
 ### Fixed
