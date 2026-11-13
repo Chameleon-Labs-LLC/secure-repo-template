@@ -677,7 +677,7 @@ jobs:
         run: |
           # -I: see the zizmor step; the working directory is the PR's checkout.
           python3 -I - <<'PY'
-          import json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
+          import http.client, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
           API = "https://api.github.com"
 
@@ -725,11 +725,13 @@ jobs:
                   fail(f"unreadable pagination link ({link[:300]})")
               return nxt
 
+          MISSING = object()  # not JSON null: a 200 with `null` is not a 404
+
           def get(url, missing_ok=False):
-              # Returns the decoded JSON and the next page's URL, or (None,
+              # Returns the decoded JSON and the next page's URL, or (MISSING,
               # None) for a repository that does not exist when missing_ok.
-              # A dropped connection or a 5xx is retried twice; anything else,
-              # or a third failure, is a scanner error.
+              # A dropped connection, a truncated body or a 5xx is retried
+              # twice; anything else, or a third failure, is a scanner error.
               for attempt in (1, 2, 3):
                   req = urllib.request.Request(url, headers=HEADERS)
                   try:
@@ -739,10 +741,10 @@ jobs:
                       return data, next_link(link)
                   except urllib.error.HTTPError as exc:
                       if missing_ok and exc.code in (404, 451):
-                          return None, None
+                          return MISSING, None
                       if exc.code not in (500, 502, 503, 504) or attempt == 3:
                           fail(f"GET {url} returned HTTP {exc.code}")
-                  except (urllib.error.URLError, OSError) as exc:
+                  except (urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
                       if attempt == 3:
                           fail(f"GET {url} failed ({exc})")
                   except ValueError as exc:
@@ -827,9 +829,9 @@ jobs:
                   if key not in resolved:
                       info, _ = get(f"{API}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}",
                                     missing_ok=True)
-                      if info is not None and (not isinstance(info, dict) or type(info.get("id")) is not int):
+                      if info is not MISSING and (not isinstance(info, dict) or type(info.get("id")) is not int):
                           fail(f"no repository ID for {owner}/{repo}")
-                      resolved[key] = info["id"] if info else None
+                      resolved[key] = None if info is MISSING else info["id"]
                   if resolved[key] is not None:
                       by_id.setdefault(resolved[key], set()).add((name, sub.lower()))
                   # A name that no longer resolves still matches as written.
