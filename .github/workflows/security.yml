@@ -804,9 +804,13 @@ jobs:
               # owner/repo[/path] or https://github.com/owner/repo[/path]
               s = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", n.strip(), flags=re.I).strip("/")
               parts = s.split("/")
-              if len(parts) < 2 or not parts[0] or not parts[1]:
+              if len(parts) >= 2:
+                  parts[1] = re.sub(r"\.git$", "", parts[1])
+              # Plain parts only, as the pin step requires of a `uses:` path,
+              # so an advisory name can never be a spelling the pin cannot be.
+              if len(parts) < 2 or not all(re.fullmatch(r"[A-Za-z0-9_.-]*[A-Za-z0-9_-]", x) for x in parts):
                   return None
-              return parts[0], re.sub(r"\.git$", "", parts[1]), "/".join(parts[2:])
+              return parts[0], parts[1], "/".join(parts[2:])
 
           # Every advisory package name in the actions ecosystem, and the ID of
           # the repository it names. GET /repos/{old name} redirects to the
