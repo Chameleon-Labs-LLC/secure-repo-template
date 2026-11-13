@@ -484,6 +484,7 @@ jobs:
                   files.append(p)
           pins = {}  # (owner, repo, sha, subpath) -> [file]; subpath is "" for a root action
           uppercase = []  # (file, uses value) pinned with uppercase hex
+          noncanon = []  # (file, uses value) with an empty, `.`, `..` or backslash path part
           for p in sorted(files):
               try:
                   # "./" + p: a PR-controlled directory named like an option
@@ -521,6 +522,12 @@ jobs:
                       parts = name.split("/")
                       if len(parts) < 2:
                           continue
+                      if "\\" in name or any(s_ in ("", ".", "..") for s_ in parts):
+                          # The runner drops empty and `.` path parts, so
+                          # `owner/repo/a/./b` runs `owner/repo/a/b`, but no
+                          # advisory name matches the spelling as written.
+                          noncanon.append((p, value))
+                          continue
                       where = pins.setdefault((parts[0], parts[1], ref, "/".join(parts[2:])), [])
                       if p not in where:
                           where.append(p)
@@ -539,6 +546,8 @@ jobs:
           for p, value in uppercase:
               upper_pins.add(value)
               print(f"::error file={prop(p)},title=action pins::{esc(value)} is pinned with uppercase hex. zizmor matches a pin to its release tag case-sensitively, so no advisory can be matched to it. Pin the lowercase SHA.")
+          for p, value in noncanon:
+              print(f"::error file={prop(p)},title=action pins::{esc(value)} has an empty, `.` or `..` path part or a backslash. The runner resolves it to another path, which no advisory name would match as written. Write the plain owner/repo/path.")
           for (owner, repo, sha, subpath), where in sorted(pins.items()):
               key = (owner, repo)
               if key not in canon:
@@ -644,8 +653,9 @@ jobs:
               print(f"::error title=action pins::scanner error: cannot hand the pins to the advisory step ({esc(exc)}); not a findings result")
               sys.exit(2)
           print(f"action pins: {len(pins)} distinct SHA pins checked; rejected: {len(upper_pins)} written in uppercase hex, "
+                f"{len(noncanon)} with a non-canonical path, "
                 f"{len(wrong_name)} repositories not spelled as GitHub does, {len(untagged)} not a tagged release")
-          sys.exit(1 if upper_pins or untagged or wrong_name else 0)
+          sys.exit(1 if upper_pins or noncanon or untagged or wrong_name else 0)
           PY
       # zizmor 1.32.0 looks up advisories for step actions only, under the
       # name as written. It misses advisories against reusable workflows
@@ -665,7 +675,7 @@ jobs:
         run: |
           # -I: see the zizmor step; the working directory is the PR's checkout.
           python3 -I - <<'PY'
-          import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+          import json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
           API = "https://api.github.com"
 
@@ -691,29 +701,75 @@ jobs:
           HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "action-advisory-check",
                      "X-GitHub-Api-Version": "2022-11-28", "Authorization": f"Bearer {token}"}
 
+          class SameHost(urllib.request.HTTPRedirectHandler):
+              # GitHub redirects a renamed repository within the API host;
+              # anything else would carry the token elsewhere.
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  if not newurl.startswith(API + "/"):
+                      fail(f"redirect away from {API} ({newurl[:200]})")
+                  return super().redirect_request(req, fp, code, msg, headers, newurl)
+          OPENER = urllib.request.build_opener(SameHost)
+
+          def next_link(link):
+              # The rel="next" URL of a Link header, wherever its parameters sit.
+              nxt = None
+              for m in re.finditer(r'<([^>]*)>([^<]*)', link):
+                  rels = re.findall(r';\s*rel\s*=\s*"?([^";,]*)', m.group(2), flags=re.I)
+                  if any("next" in r.lower().split() for r in rels):
+                      if nxt is not None or not m.group(1).startswith(API + "/"):
+                          fail(f"unexpected pagination link ({link[:300]})")
+                      nxt = m.group(1)
+              if nxt is None and re.search(r"\bnext\b", re.sub(r"<[^>]*>", "", link), flags=re.I):
+                  fail(f"unreadable pagination link ({link[:300]})")
+              return nxt
+
           def get(url, missing_ok=False):
               # Returns the decoded JSON and the next page's URL, or (None,
               # None) for a repository that does not exist when missing_ok.
-              req = urllib.request.Request(url, headers=HEADERS)
-              try:
-                  with urllib.request.urlopen(req, timeout=60) as resp:
-                      data = json.load(resp)
-                      link = resp.headers.get("Link", "")
-              except urllib.error.HTTPError as exc:
-                  if missing_ok and exc.code in (404, 451):
-                      return None, None
-                  fail(f"GET {url} returned HTTP {exc.code}")
-              except (urllib.error.URLError, OSError, ValueError) as exc:
-                  fail(f"GET {url} failed ({exc})")
-              m = re.search(r'<(https://api\.github\.com/[^>]+)>;\s*rel="next"', link)
-              return data, (m.group(1) if m else None)
+              # A dropped connection or a 5xx is retried twice; anything else,
+              # or a third failure, is a scanner error.
+              for attempt in (1, 2, 3):
+                  req = urllib.request.Request(url, headers=HEADERS)
+                  try:
+                      with OPENER.open(req, timeout=60) as resp:
+                          data = json.load(resp)
+                          link = resp.headers.get("Link", "")
+                      return data, next_link(link)
+                  except urllib.error.HTTPError as exc:
+                      if missing_ok and exc.code in (404, 451):
+                          return None, None
+                      if exc.code not in (500, 502, 503, 504) or attempt == 3:
+                          fail(f"GET {url} returned HTTP {exc.code}")
+                  except (urllib.error.URLError, OSError) as exc:
+                      if attempt == 3:
+                          fail(f"GET {url} failed ({exc})")
+                  except ValueError as exc:
+                      fail(f"GET {url} returned unreadable JSON ({exc})")
+                  time.sleep(5 * attempt)
+
+          def vulns_of(adv):
+              # Every advisory must carry the fields this step reads, or a
+              # malformed one could drop a name (a clean pass) or be reported
+              # as a finding.
+              ok = (isinstance(adv, dict) and isinstance(adv.get("ghsa_id"), str)
+                    and (adv.get("withdrawn_at") is None or isinstance(adv["withdrawn_at"], str))
+                    and isinstance(adv.get("vulnerabilities"), list)
+                    and all(isinstance(v, dict) and isinstance(v.get("package"), dict)
+                            and isinstance(v["package"].get("name"), str)
+                            and isinstance(v["package"].get("ecosystem"), str)
+                            for v in adv["vulnerabilities"]))
+              if not ok:
+                  fail(f"an advisory without the expected fields ({str(adv)[:200]})")
+              return adv["vulnerabilities"]
 
           def get_all(url):
               out, pages = [], 0
               while url:
                   data, url = get(url)
-                  if not isinstance(data, list) or not all(isinstance(a, dict) for a in data):
+                  if not isinstance(data, list):
                       fail("the advisory API did not return a list of advisories")
+                  for adv in data:
+                      vulns_of(adv)
                   out += data
                   pages += 1
                   if pages > 200:
@@ -727,6 +783,13 @@ jobs:
                   raise ValueError("not a list")
           except (KeyError, OSError, ValueError) as exc:
               fail(f"no pin list from the pin step, which stopped before writing it ({exc})")
+          for x in pins:
+              if not (isinstance(x, dict) and type(x.get("id")) is int
+                      and all(isinstance(x.get(k), str) and x[k] for k in ("owner", "repo", "full_name", "sha"))
+                      and isinstance(x.get("subpath"), str)
+                      and isinstance(x.get("files"), list) and x["files"] and all(isinstance(f, str) for f in x["files"])
+                      and isinstance(x.get("versions"), list) and all(isinstance(v, str) and v for v in x["versions"])):
+                  fail(f"a malformed pin record ({str(x)[:200]})")
 
           def split_name(n):
               # owner/repo[/path] or https://github.com/owner/repo[/path]
@@ -742,11 +805,12 @@ jobs:
           advisories = get_all(f"{API}/advisories?ecosystem=actions&per_page=100")
           by_id, by_name, resolved = {}, {}, {}
           for adv in advisories:
-              for v in adv.get("vulnerabilities") or []:
-                  pkg = (v or {}).get("package") or {}
-                  name = pkg.get("name")
-                  if pkg.get("ecosystem") != "actions" or not isinstance(name, str) or not split_name(name):
+              for v in vulns_of(adv):
+                  name = v["package"]["name"]
+                  if v["package"]["ecosystem"] != "actions":
                       continue
+                  if not split_name(name) or "," in name or "@" in name:
+                      fail(f"{adv['ghsa_id']} names the action {name!r}, which this step cannot query")
                   owner, repo, sub = split_name(name)
                   key = (owner.lower(), repo.lower())
                   if key not in resolved:
@@ -760,11 +824,17 @@ jobs:
                   # A name that no longer resolves still matches as written.
                   by_name.setdefault(key, set()).add((name, sub.lower()))
 
-          hits = set()
+          hits, unchecked = set(), set()
           for pin in pins:
               owner, repo, full, rid = pin["owner"], pin["repo"], pin["full_name"], pin["id"]
               sub = pin["subpath"].strip("/")
               shown = f"{owner}/{repo}{'/' + sub if sub else ''}@{pin['sha']}"
+              if not pin["versions"]:
+                  # The pin step already rejects it as not a tagged release.
+                  unchecked.add(shown)
+                  for p in pin["files"]:
+                      print(f"::error file={prop(p)},title=action advisories::{esc(shown)} has no release version, so no advisory can be checked for it (see the pin step).")
+                  continue
               def applies(asub):
                   # An advisory against the repository covers all of it; one
                   # against a path covers that path and anything below it.
@@ -780,12 +850,11 @@ jobs:
                   found = get_all(f"{API}/advisories?" + urllib.parse.urlencode(
                       {"ecosystem": "actions", "affects": affects, "per_page": "100"}))
                   for adv in found:
-                      if adv.get("withdrawn_at") or (adv.get("ghsa_id", "?"), shown) in hits:
+                      ghsa = adv["ghsa_id"]
+                      if adv["withdrawn_at"] or (ghsa, shown) in hits:
                           continue
-                      ghsa = adv.get("ghsa_id", "?")
-                      ranges = "; ".join(f"{(v.get('package') or {}).get('name')} {v.get('vulnerable_version_range')}"
-                                         for v in adv.get("vulnerabilities") or []
-                                         if (v.get("package") or {}).get("name") in names)
+                      ranges = "; ".join(f"{v['package']['name']} {v.get('vulnerable_version_range')}"
+                                         for v in adv["vulnerabilities"] if v["package"]["name"] in names)
                       hits.add((ghsa, shown))
                       for p in pin["files"]:
                           print(f"::error file={prop(p)},title=action advisories::{esc(shown)} is release {esc(version)}, "
@@ -793,8 +862,8 @@ jobs:
                                 f"Pin a fixed release.")
           print(f"action advisories: {len(advisories)} reviewed advisories in the actions ecosystem, "
                 f"{len(resolved)} repositories named, {sum(1 for v in resolved.values() if v is None)} no longer exist; "
-                f"{len(pins)} pins checked, {len(hits)} findings")
-          sys.exit(1 if hits else 0)
+                f"{len(pins)} pins, {len(unchecked)} without a release version, {len(hits)} findings")
+          sys.exit(1 if hits or unchecked else 0)
           PY
 
   npm-audit:
