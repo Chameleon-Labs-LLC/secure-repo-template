@@ -484,7 +484,7 @@ jobs:
                   files.append(p)
           pins = {}  # (owner, repo, sha, subpath) -> [file]; subpath is "" for a root action
           uppercase = []  # (file, uses value) pinned with uppercase hex
-          noncanon = []  # (file, uses value) with an empty, `.`, `..` or backslash path part
+          noncanon = []  # (file, uses value) with a path part that is not plain (see below)
           for p in sorted(files):
               try:
                   # "./" + p: a PR-controlled directory named like an option
@@ -522,10 +522,12 @@ jobs:
                       parts = name.split("/")
                       if len(parts) < 2:
                           continue
-                      if "\\" in name or any(s_ in ("", ".", "..") for s_ in parts):
-                          # The runner drops empty and `.` path parts, so
-                          # `owner/repo/a/./b` runs `owner/repo/a/b`, but no
-                          # advisory name matches the spelling as written.
+                      if not all(re.fullmatch(r"[A-Za-z0-9_.-]*[A-Za-z0-9_-]", s_) for s_ in parts):
+                          # The runner drops empty and `.` path parts, and a
+                          # Windows runner drops a trailing dot, so
+                          # `owner/repo/a/./b` and `owner/repo/a./b` run
+                          # `owner/repo/a/b`, but no advisory name matches the
+                          # spelling as written. Only plain path parts pass.
                           noncanon.append((p, value))
                           continue
                       where = pins.setdefault((parts[0], parts[1], ref, "/".join(parts[2:])), [])
@@ -547,7 +549,7 @@ jobs:
               upper_pins.add(value)
               print(f"::error file={prop(p)},title=action pins::{esc(value)} is pinned with uppercase hex. zizmor matches a pin to its release tag case-sensitively, so no advisory can be matched to it. Pin the lowercase SHA.")
           for p, value in noncanon:
-              print(f"::error file={prop(p)},title=action pins::{esc(value)} has an empty, `.` or `..` path part or a backslash. The runner resolves it to another path, which no advisory name would match as written. Write the plain owner/repo/path.")
+              print(f"::error file={prop(p)},title=action pins::{esc(value)} has a path part that is empty, `.` or `..`, ends in a dot, or uses a character other than letters, digits, `_`, `-` and `.`. The runner may resolve it to another path, which no advisory name would match as written. Write the plain owner/repo/path.")
           for (owner, repo, sha, subpath), where in sorted(pins.items()):
               key = (owner, repo)
               if key not in canon:
@@ -653,7 +655,7 @@ jobs:
               print(f"::error title=action pins::scanner error: cannot hand the pins to the advisory step ({esc(exc)}); not a findings result")
               sys.exit(2)
           print(f"action pins: {len(pins)} distinct SHA pins checked; rejected: {len(upper_pins)} written in uppercase hex, "
-                f"{len(noncanon)} with a non-canonical path, "
+                f"{len(noncanon)} with a path that is not plain, "
                 f"{len(wrong_name)} repositories not spelled as GitHub does, {len(untagged)} not a tagged release")
           sys.exit(1 if upper_pins or noncanon or untagged or wrong_name else 0)
           PY
@@ -752,7 +754,10 @@ jobs:
               # malformed one could drop a name (a clean pass) or be reported
               # as a finding.
               ok = (isinstance(adv, dict) and isinstance(adv.get("ghsa_id"), str)
-                    and (adv.get("withdrawn_at") is None or isinstance(adv["withdrawn_at"], str))
+                    and re.fullmatch(r"GHSA(-[0-9a-z]{4}){3}", adv["ghsa_id"])
+                    and (adv.get("withdrawn_at") is None
+                         or isinstance(adv["withdrawn_at"], str)
+                         and re.match(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", adv["withdrawn_at"]))
                     and isinstance(adv.get("vulnerabilities"), list)
                     and all(isinstance(v, dict) and isinstance(v.get("package"), dict)
                             and isinstance(v["package"].get("name"), str)
@@ -760,6 +765,10 @@ jobs:
                             for v in adv["vulnerabilities"]))
               if not ok:
                   fail(f"an advisory without the expected fields ({str(adv)[:200]})")
+              for v in adv["vulnerabilities"]:
+                  name = v["package"]["name"]
+                  if v["package"]["ecosystem"] == "actions" and (not split_name(name) or "," in name or "@" in name):
+                      fail(f"{adv['ghsa_id']} names the action {name!r}, which this step cannot query")
               return adv["vulnerabilities"]
 
           def get_all(url):
@@ -809,8 +818,6 @@ jobs:
                   name = v["package"]["name"]
                   if v["package"]["ecosystem"] != "actions":
                       continue
-                  if not split_name(name) or "," in name or "@" in name:
-                      fail(f"{adv['ghsa_id']} names the action {name!r}, which this step cannot query")
                   owner, repo, sub = split_name(name)
                   key = (owner.lower(), repo.lower())
                   if key not in resolved:
@@ -853,8 +860,11 @@ jobs:
                       ghsa = adv["ghsa_id"]
                       if adv["withdrawn_at"] or (ghsa, shown) in hits:
                           continue
-                      ranges = "; ".join(f"{v['package']['name']} {v.get('vulnerable_version_range')}"
-                                         for v in adv["vulnerabilities"] if v["package"]["name"] in names)
+                      matched = [v for v in adv["vulnerabilities"]
+                                 if v["package"]["ecosystem"] == "actions" and v["package"]["name"] in names]
+                      if not matched:
+                          fail(f"{ghsa} was returned for {affects} but names none of those actions")
+                      ranges = "; ".join(f"{v['package']['name']} {v.get('vulnerable_version_range')}" for v in matched)
                       hits.add((ghsa, shown))
                       for p in pin["files"]:
                           print(f"::error file={prop(p)},title=action advisories::{esc(shown)} is release {esc(version)}, "
