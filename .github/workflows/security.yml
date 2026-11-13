@@ -742,6 +742,10 @@ jobs:
                   except urllib.error.HTTPError as exc:
                       if missing_ok and exc.code in (404, 451):
                           return MISSING, None
+                      # Say so when the token's hourly quota is gone, so that is
+                      # not mistaken for an advisory-API outage. The check still fails.
+                      if exc.code in (403, 429) and exc.headers.get("X-RateLimit-Remaining") == "0":
+                          fail(f"GET {url} exhausted the GITHUB_TOKEN rate limit (resets at epoch {exc.headers.get('X-RateLimit-Reset')}); not an advisory result")
                       if exc.code not in (500, 502, 503, 504) or attempt == 3:
                           fail(f"GET {url} returned HTTP {exc.code}")
                   except (urllib.error.URLError, OSError, http.client.IncompleteRead) as exc:
