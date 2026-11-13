@@ -1052,7 +1052,28 @@ jobs:
         if: steps.lock.outputs.present == 'true'
         # --include: verify every installed dependency type, whatever `omit`
         # the trusted .npmrc sets (the listing below assumes all are checked).
-        run: npm audit signatures --include=dev --include=optional --include=peer
+        # The registry sometimes answers the signing-key lookup without the key
+        # an attestation names (EMISSINGSIGNATUREKEY), on a different package
+        # each run, lockfile unchanged. Only that error is retried: up to 3
+        # attempts 15 s apart, the later ones with --prefer-online so a cached
+        # key list is not reused. Any other failure, including an invalid
+        # signature, fails on the first attempt.
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/npm-audit-signatures.log"
+          for attempt in 1 2 3; do
+            flags=()
+            [ "$attempt" -gt 1 ] && flags=(--prefer-online)
+            if npm audit signatures --include=dev --include=optional --include=peer "${flags[@]}" 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            if ! grep -q 'EMISSINGSIGNATUREKEY' "$log" || [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "::warning title=npm audit signatures::attempt $attempt: registry returned no key for an attestation (EMISSINGSIGNATUREKEY); retrying"
+            sleep 15
+          done
       # A locked dependency counts as covered only when it resolves to a .tgz
       # under the configured registry (registry.npmjs.org unless the trusted
       # .npmrc says otherwise) and has an integrity hash. Any other https host
