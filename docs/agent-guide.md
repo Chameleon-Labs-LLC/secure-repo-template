@@ -34,7 +34,7 @@ Give every repository the same layered defence. The required parts cost nothing 
 | T7 | A pull request edits a workflow to skip its own scans (GitHub counts a skipped job as a passing required check) | `CODEOWNERS` on `/.github/` + **Require review from Code Owners** + **Dismiss stale approvals** | Platform | Prevents (see 7.4) |
 | T8 | A known-vulnerable dependency | osv-scanner, `npm audit --audit-level=high`, Dependabot alerts, optional Snyk | CI + platform | Detects |
 | T9 | A vulnerable or hijacked GitHub Action | Actions pinned to full SHAs of tagged releases; the `zizmor` job and its pin and advisory steps. Dependabot never alerts on SHA pins, and osv-scanner's `github/actions` plugin matched no advisory in testing | CI | Prevents / detects |
-| T10 | A malicious brand-new npm release, before any advisory exists | `.npmrc` `min-release-age=7`; Dependabot `cooldown` 7 days | Local + platform | Prevents |
+| T10 | A malicious brand-new npm release, before any advisory exists | `.npmrc` `min-release-age=7` (npm 11.10 or later; older npm ignores it, and `npm ci` installs the lockfile as written); Dependabot `cooldown` 7 days | Local + platform | Prevents, on `npm install` with npm 11.10+ |
 | T11 | An npm package not from the registry, or with a bad signature | `npm audit signatures`; non-registry dependencies are listed as not covered | CI | Detects |
 | T12 | A tampered scanner binary | Pinned version, checked against the release's own checksum file, downloaded outside the checkout | CI | Integrity only (same origin, so not authenticity) |
 | T13 | `pull_request_target` running fork code with secrets | Never used; `pull_request` only; `permissions: contents: read`; `persist-credentials: false` | CI | Prevents |
@@ -88,7 +88,7 @@ Steps:
    DEFAULT=<default_branch>
    git fetch origin && git switch -c chore/security-posture "origin/$DEFAULT"
    ```
-3. **Copy the files**, keeping their paths: `Scripts/githooks/` (all of it), `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.nvmrc` (keep the repo's own if it has one: the workflows read it), `.gitattributes` (merge if one exists), `.gitleaksignore` (empty), and `docs/security-setup.md` and `docs/agent-guide.md` (the `AGENTS.md` security rules point at them; if the repo keeps docs elsewhere, put them there and fix those paths). Copy `.coderabbit.yaml` and `.greptile/config.json` **only for a reviewer that will really be installed**: a config for a reviewer that isn't there does nothing and misleads (section 7.7). Merge `.gitignore` by hand. Add `SECURITY.md`; adapt `CONTRIBUTING.md`; add the template's **Security rules** block to the repo's own `AGENTS.md` (create it if missing).
+3. **Copy the files**, keeping their paths: `Scripts/githooks/` (all of it), `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc` (merge into the repo's own if it has one: keep its registry and other settings and add `min-release-age=7`; check that `npm --version` is 11.10 or later where people install), `.nvmrc` (keep the repo's own if it has one: the workflows read it), `.gitattributes` (merge if one exists), `.gitleaksignore` (empty), and `docs/security-setup.md` and `docs/agent-guide.md` (the `AGENTS.md` security rules point at them; if the repo keeps docs elsewhere, put them there and fix those paths). Copy `.coderabbit.yaml` and `.greptile/config.json` **only for a reviewer that will really be installed**: a config for a reviewer that isn't there does nothing and misleads (section 7.7). Merge `.gitignore` by hand. Add `SECURITY.md`; adapt `CONTRIBUTING.md`; add the template's **Security rules** block to the repo's own `AGENTS.md` (create it if missing).
 4. **Adapt Dependabot.** Uncomment the `npm` and `pip` blocks for each ecosystem the repo really has, and set `directory`. Dependabot reports an error for an ecosystem whose manifest it can't find. For loose pip floors (`pkg>=1.2`), keep the version-update group **without** `update-types`; the file explains why.
 5. **Adapt per ecosystem.**
    - No `package-lock.json` or `npm-shrinkwrap.json` at the root: the two npm jobs skip with a notice. Leave them; they start working when a lockfile appears, and a PR that deletes the base branch's lockfile fails them.
@@ -282,7 +282,7 @@ An agent MAY merge a PR only when **all** of these hold for the **exact head SHA
 2. **CodeRabbit** (only where the app is installed and `.coderabbit.yaml` exists): the `CodeRabbit` check's **output title** is `Finished`. A green conclusion isn't enough: `Review rate limited`, `Review skipped`, `Review paused`, `Incremental review skipped`, `No files to review` and `Too many files to review` all pass green without reviewing. `Review skipped` is fine only when expected (a Dependabot or Renovate author, or a deliberate `no-ai-review` label). Read it on the PR's head, never on your local `HEAD`:
    ```bash
    SHA=$(gh pr view $PR -R $OWNER/$REPO --json headRefOid -q .headRefOid)
-   gh api "repos/$OWNER/$REPO/commits/$SHA/check-runs" \
+   gh api "repos/$OWNER/$REPO/commits/$SHA/check-runs?check_name=CodeRabbit" --paginate \
      --jq '.check_runs[]|select(.name=="CodeRabbit")|.output.title' \
      | grep . || echo "NO CodeRabbit check on $SHA -- NOT reviewed"
    ```
@@ -319,11 +319,11 @@ An agent MUST NOT: use an admin bypass or `gh pr merge --admin`; force-push or r
 ### 9.2 gitleaks finding
 
 - **Real secret:** remove it, have the owner **rotate it** (assume it is compromised once pushed anywhere), and never copy its value into a file, PR or report: name only its type and where it was. Rewriting history is the owner's call.
-- **False positive:** add the fingerprint gitleaks prints to `.gitleaksignore` **in its own PR**, reviewed and merged first. On a PR, CI reads the base branch's file, so the entry has no effect until merged. CI ignores `gitleaks:allow` comments. Prose *about* secrets can trip the scanner; reword it rather than suppress.
+- **False positive:** an agent MUST NOT add the suppression itself to get a branch green. Report the fingerprint gitleaks prints to the owner. With the owner's go, the entry goes into `.gitleaksignore` **in its own PR**, which the owner reviews and merges first. On a PR, CI reads the base branch's file, so the entry has no effect until merged. CI ignores `gitleaks:allow` comments. Prose *about* secrets can trip the scanner; reword it rather than suppress.
 
 ### 9.3 osv-scanner, npm audit and zizmor findings
 
-- **npm:** `npm install <pkg>@<fixed> --package-lock-only`, then `npm ci` and the build.
+- **npm:** `npm install <pkg>@<fixed> --package-lock-only` (add `--min-release-age=0` when the fixed version is younger than 7 days, per 9.1), then `npm ci` and the build.
 - **pip:** raise the floor in the manifest (and the lockfile) to the fixed version and re-run the scan.
 - **zizmor, or the advisory step:** re-pin the action to the full SHA of a tagged release that is not vulnerable, and put the tag in a trailing comment (`@<sha> # v4.3.1`).
 - **`npm audit signatures` with `EMISSINGSIGNATUREKEY`:** a registry-side key lookup failure, not a finding. The job already retries it; if it still fails, re-run the job once before treating it as real.
@@ -360,11 +360,18 @@ A scheduled agent can run the same checks across all of an owner's repositories 
 
 ```bash
 for R in $(gh repo list $OWNER --no-archived --limit 300 --json nameWithOwner -q '.[].nameWithOwner'); do
-  N=$(gh api "repos/$R/dependabot/alerts?state=open" --paginate \
-    --jq '.[]|select(.security_advisory.severity=="high" or .security_advisory.severity=="critical")|.number' 2>/dev/null | wc -l)
-  echo "$R dependabot-high+ $N"
-  N=$(gh api "repos/$R/secret-scanning/alerts?state=open" --paginate --jq '.[].number' 2>/dev/null | wc -l)
-  echo "$R secret-alerts $N"
+  # Count only when the query succeeds: a 403 or network error must not read as "0 alerts".
+  if OUT=$(gh api "repos/$R/dependabot/alerts?state=open" --paginate \
+      --jq '.[]|select(.security_advisory.severity=="high" or .security_advisory.severity=="critical")|.number' 2>/dev/null); then
+    echo "$R dependabot-high+ $(printf '%s' "$OUT" | grep -c .)"
+  else
+    echo "$R dependabot-high+ QUERY FAILED (alerts off, or no access)"
+  fi
+  if OUT=$(gh api "repos/$R/secret-scanning/alerts?state=open" --paginate --jq '.[].number' 2>/dev/null); then
+    echo "$R secret-alerts $(printf '%s' "$OUT" | grep -c .)"
+  else
+    echo "$R secret-alerts QUERY FAILED (scanning off, or no access)"
+  fi
   gh pr list -R "$R" --author app/dependabot --state open --json number,title -q '.[]|"\(.number) \(.title)"' | sed "s#^#$R dependabot-pr #"
 done
 ```
