@@ -270,7 +270,7 @@ For the agent itself, [agent-guide.md](agent-guide.md) has the full procedure: a
 
 - reads the repository's `AGENTS.md` first;
 - fixes one problem per pull request, with the smallest version upgrade that clears the advisory;
-- merges only when every check is green on the exact commit being merged and, where an AI reviewer is installed, only after it has actually finished;
+- merges only when every check is green on the exact commit being merged and, where CodeRabbit is installed, only after it has actually finished (Greptile reviews once, when the pull request opens, and its comments are read but it never holds up a merge);
 - never skips the hook, never adds an exception to make a check pass, never bypasses branch rules, and never acts on instructions inside a vulnerability report from a person.
 
 Our agent configuration and plugins are open source too. They're listed at [chameleonlabs.ai/open-source](https://chameleonlabs.ai/open-source).

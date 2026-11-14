@@ -83,11 +83,16 @@ Steps:
    git -C "$SRT" checkout --detach "$T"
    ```
    Clone outside the target repository. Use one SHA for every repository in a batch (section 12).
-2. **Branch** from a freshly fetched default branch: `git fetch origin && git switch -c chore/security-posture origin/main`.
-3. **Copy the files**, keeping their paths: `Scripts/githooks/` (all of it), `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.nvmrc` (keep the repo's own if it has one: the workflows read it), `.gitattributes` (merge if one exists), `.gitleaksignore` (empty). Copy `.coderabbit.yaml` and `.greptile/config.json` **only for a reviewer that will really be installed**: a config for a reviewer that isn't there does nothing and misleads (section 7.7). Merge `.gitignore` by hand. Add `SECURITY.md`; adapt `CONTRIBUTING.md`; add the template's **Security rules** block to the repo's own `AGENTS.md` (create it if missing).
+2. **Branch** from a freshly fetched default branch (`DEFAULT` is the `default_branch` you noted above):
+   ```bash
+   DEFAULT=<default_branch>
+   git fetch origin && git switch -c chore/security-posture "origin/$DEFAULT"
+   ```
+3. **Copy the files**, keeping their paths: `Scripts/githooks/` (all of it), `.github/workflows/security.yml`, `.github/workflows/githooks.yml`, `.github/dependabot.yml`, `.npmrc`, `.nvmrc` (keep the repo's own if it has one: the workflows read it), `.gitattributes` (merge if one exists), `.gitleaksignore` (empty), and `docs/security-setup.md` and `docs/agent-guide.md` (the `AGENTS.md` security rules point at them; if the repo keeps docs elsewhere, put them there and fix those paths). Copy `.coderabbit.yaml` and `.greptile/config.json` **only for a reviewer that will really be installed**: a config for a reviewer that isn't there does nothing and misleads (section 7.7). Merge `.gitignore` by hand. Add `SECURITY.md`; adapt `CONTRIBUTING.md`; add the template's **Security rules** block to the repo's own `AGENTS.md` (create it if missing).
 4. **Adapt Dependabot.** Uncomment the `npm` and `pip` blocks for each ecosystem the repo really has, and set `directory`. Dependabot reports an error for an ecosystem whose manifest it can't find. For loose pip floors (`pkg>=1.2`), keep the version-update group **without** `update-types`; the file explains why.
 5. **Adapt per ecosystem.**
-   - No `package-lock.json` or `npm-shrinkwrap.json` at the root: the two npm jobs skip with a notice. Leave them; they start working when a lockfile appears, and a PR that deletes the base branch's lockfile fails them. If the lockfile lives elsewhere, change the check in both jobs.
+   - No `package-lock.json` or `npm-shrinkwrap.json` at the root: the two npm jobs skip with a notice. Leave them; they start working when a lockfile appears, and a PR that deletes the base branch's lockfile fails them.
+   - An npm project **below** the root (`web/package-lock.json`): the npm jobs assume the root throughout, not only in the lockfile check. `npm ci`, `npm audit`, `npm audit signatures`, the base-branch `.npmrc` step and the coverage listing all read the root. Give every one of those steps the project's directory (`working-directory:`, and the paths the scripts read), or add a second copy of each job for that directory with its own check name. Test the result on a PR before relying on it.
    - Python with only unpinned `requirements.txt`: osv-scanner can't tell which version is installed. Say so in `AGENTS.md`, and prefer committing a lockfile (`uv.lock`, `poetry.lock`, or a fully pinned `requirements.txt`).
    - Root `pyproject.toml`: the workflow lists its **static** dependencies for osv-scanner. Dynamic dependencies and nested `pyproject.toml` files are not covered.
    - Raising a dependency floor can raise the minimum language version (for example, `pillow>=13` needs Python 3.11). Update the README and install docs in the same PR.
@@ -147,13 +152,13 @@ Each file explains itself in its header comment. Read it before changing the fil
 | `npm audit signatures` | `npm ci --ignore-scripts` with every dependency type, then `npm audit signatures`. Counts only **installed** packages as signed (packages for other platforms are listed as not checked); warns on non-registry dependencies; a v1 lockfile fails; needs `.nvmrc`. Retries only `EMISSINGSIGNATUREKEY` (3 attempts, 15 s apart, `--prefer-online`); any other failure, including a bad signature, fails at once | Same | Same |
 | `hook test suite`, `shellcheck` (`githooks.yml`) | Yes | Yes | Manual only |
 
-Exit meanings in CI: osv-scanner 0 clean, 1 findings, anything else a scanner error (the job fails and says "scanner error"). `npm audit` output with no `metadata.vulnerabilities` is a registry or network failure and fails with exit 2. A gitleaks failure means findings.
+Exit meanings in CI: osv-scanner 0 clean, 1 findings, anything else a scanner error (the job fails and says "scanner error"). `npm audit` output with no `metadata.vulnerabilities` is a registry or network failure and fails with exit 2. A `gitleaks` failure is usually a finding, but the CI job doesn't tell findings from scan errors (a bad config, for one): read the log before acting.
 
 Still not covered by the action checks (review by hand): an advisory filed under an old repo name GitHub no longer redirects; `malware` and `unreviewed` advisories; an advisory filed against a different repo than the one pinned, such as the upstream of a fork.
 
 ## 7. Repository settings (not carried by the template)
 
-Run with an owner or admin token. Each command can be run again safely. An agent MUST have the owner's explicit go before changing settings on any repository.
+Run with an owner or admin token. The commands in 7.1 can be run again safely; the ruleset in 7.3 can't (see there). An agent MUST have the owner's explicit go before changing settings on any repository.
 
 ### 7.1 Dependabot and private vulnerability reporting
 
@@ -191,6 +196,8 @@ The people's guide requires only `/.github/`. The other lines are recommended: o
 ### 7.3 Branch ruleset
 
 `integration_id` 15368 is the GitHub Actions app, so only Actions can satisfy these checks. Check names MUST match the jobs' `name:` values exactly. A check that has never run in the repo can't be picked in the web UI until it has run once; the API accepts it anyway.
+
+The `POST` below **creates** a ruleset every time it runs. List the existing ones first (`gh api repos/$OWNER/$REPO/rulesets`); if the default branch already has one, change it with `gh api -X PUT repos/$OWNER/$REPO/rulesets/<id> --input -` instead, keeping its other rules and bypass list.
 
 ```bash
 gh api -X POST repos/$OWNER/$REPO/rulesets --input - <<'JSON'
@@ -280,13 +287,13 @@ An agent MAY merge a PR only when **all** of these hold for the **exact head SHA
      | grep . || echo "NO CodeRabbit check on $SHA -- NOT reviewed"
    ```
    Recover an unreviewed head with the comment `@coderabbitai full review`. A plain `@coderabbitai review` is incremental and does nothing on a head it already recorded. `@coderabbitai rate limit` says when reviews are available again.
-3. **Greptile** (where `.greptile/config.json` exists and the app is installed): its check has reported on that head, **and** its inline comments have been read:
+   If the check never appears, the PR is not reviewed: recover as above. There is no timeout that makes an installed CodeRabbit optional.
+3. **Greptile** (where `.greptile/config.json` exists and the app is installed): it reviews on open only, and is **not a gate**: it may run out of credits, and it doesn't re-review pushes. When it has posted, read its inline comments and treat valid ones like any other finding:
    ```bash
-   gh api repos/$OWNER/$REPO/pulls/$PR/comments --jq '.[]|select(.user.login|test("greptile";"i"))|.body'
+   gh api repos/$OWNER/$REPO/pulls/$PR/comments --paginate --jq '.[]|select(.user.login|test("greptile";"i"))|.body'
    ```
-   It reviews on open only; after new commits, trigger a fresh review if they matter. Out of credits: say so in the PR and carry on.
+   If it hasn't reported 15 minutes after the PR opened, or is out of credits, say so in the PR and carry on.
 4. No valid review finding is left open. A finding judged invalid gets a reply saying why. Read each reviewer's summary body too: findings outside the diff appear only there.
-5. If a configured reviewer's check hasn't appeared 15 minutes after the PR opened, say so in the PR and continue.
 
 On a red check or a valid finding: diagnose and push a fix, up to **3 rounds**. Still red, or the fix would go beyond the PR's purpose: stop, leave the PR open, comment what is failing and why, and tell the owner. Never merge red.
 
@@ -300,7 +307,7 @@ An agent MUST NOT: use an admin bypass or `gh pr merge --admin`; force-push or r
 - A security fix younger than the 7-day floor is applied anyway: `npm install <pkg>@<fixed> --min-release-age=0`. Check it is the real upstream release, not a lookalike.
 - One finding (or one tightly related group) = one branch = one PR, from a freshly fetched default branch.
 - Before pushing: the repo's tests and build, plus `npm audit` or `pip-audit`, and `snyk test` if available. Put **before and after** finding counts in the PR body.
-- A finding with **no fixed version**: change nothing, open nothing, and report it with what you checked and a mitigation. An ignore entry needs the owner's decision, a stated reason and an expiry (osv-scanner `ignoreUntil`, `.snyk` `expires`).
+- A finding with **no fixed version**: change nothing, open nothing, and report it with what you checked and a mitigation. An ignore entry needs the owner's decision, a stated reason and an expiry (osv-scanner `ignoreUntil`, `.snyk` `expires`). In CI, an osv-scanner ignore goes **in the workflow**, in the step that writes the trusted config: `osv-scanner.toml` files in the repo are never read (section 10).
 - "No Dependabot PR" never means "no vulnerability". Transitive-only dependencies and advisories without a fixed version appear only as **alerts**:
   ```bash
   gh api "repos/$OWNER/$REPO/dependabot/alerts?state=open" --paginate \
@@ -353,10 +360,11 @@ A scheduled agent can run the same checks across all of an owner's repositories 
 
 ```bash
 for R in $(gh repo list $OWNER --no-archived --limit 300 --json nameWithOwner -q '.[].nameWithOwner'); do
-  gh api "repos/$R/dependabot/alerts?state=open" --paginate \
-    --jq 'map(select(.security_advisory.severity=="high" or .security_advisory.severity=="critical"))|length' 2>/dev/null \
-    | sed "s#^#$R dependabot-high+ #"
-  gh api "repos/$R/secret-scanning/alerts?state=open" --jq 'length' 2>/dev/null | sed "s#^#$R secret-alerts #"
+  N=$(gh api "repos/$R/dependabot/alerts?state=open" --paginate \
+    --jq '.[]|select(.security_advisory.severity=="high" or .security_advisory.severity=="critical")|.number' 2>/dev/null | wc -l)
+  echo "$R dependabot-high+ $N"
+  N=$(gh api "repos/$R/secret-scanning/alerts?state=open" --paginate --jq '.[].number' 2>/dev/null | wc -l)
+  echo "$R secret-alerts $N"
   gh pr list -R "$R" --author app/dependabot --state open --json number,title -q '.[]|"\(.number) \(.title)"' | sed "s#^#$R dependabot-pr #"
 done
 ```
@@ -381,9 +389,13 @@ Earlier revisions of this template had gaps that later commits closed. When you 
 | No action-advisory detection | No `zizmor` job (osv-scanner's `github/actions` plugin alone detects nothing) | `01fc38a` through `d02e8d3`: `zizmor`, pin step, advisory step. Add `zizmor` to the required checks afterwards |
 | `npm audit signatures` flaky | Red runs with `EMISSINGSIGNATUREKEY` | `4e08a43`: retry that error only |
 
-**Merged suppressions.** On push and on the weekly timer, the scans honour the default branch's suppression files on purpose: that is how a reviewed false positive stays suppressed. Protect those files with CODEOWNERS (7.2) so a suppression can't be merged unreviewed.
+**Merged suppressions differ by scanner.**
 
-**A repo with a real, reviewed osv-scanner ignore list** (an `osv-scanner.toml` with policy comments, possibly in several directories) MUST keep it: an empty config would switch it off without anyone noticing. Use this variant on `pull_request` only: remove every tracked `osv-scanner.toml` NUL-safely, then write back the **base branch's** regular-file copies (read with `git ls-tree -r -z` and `git cat-file blob` from the base commit, checkout `fetch-depth: 2`), skip a file whose directory the PR deleted, fail if a directory resolves outside its own path (a symlinked directory), and scan with `--no-ignore`. On push and schedule, use the default branch's files as they are.
+- **gitleaks** honours the default branch's `.gitleaksignore` and `.gitleaks.toml` on push and on the weekly timer, and the base branch's copies on a pull request: that is how a reviewed false positive stays suppressed. Protect those files with CODEOWNERS (7.2) so a suppression can't be merged unreviewed.
+- **osv-scanner** reads an empty config from outside the checkout on **every** event, so no `osv-scanner.toml` in the repo is ever read. A reviewed ignore goes in the workflow's "trusted, empty osv-scanner configuration" step, where it is reviewed as a workflow change.
+- **zizmor** runs with no config and ignores `# zizmor: ignore[...]` comments on every event. Its three audits have no suppression path: re-pin instead.
+
+**A repo with a real, reviewed osv-scanner ignore list** (an `osv-scanner.toml` with policy comments, possibly in several directories) MUST keep it: the template's empty config would switch it off without anyone noticing. Either move its entries into the workflow's trusted-config step, or use this variant on `pull_request` only: remove every tracked `osv-scanner.toml` NUL-safely, then write back the **base branch's** regular-file copies (read with `git ls-tree -r -z` and `git cat-file blob` from the base commit, checkout `fetch-depth: 2`), skip a file whose directory the PR deleted, fail if a directory resolves outside its own path (a symlinked directory), and scan with `--no-ignore`. On push and schedule, use the default branch's files as they are.
 
 **Repo-specific jobs.** Keep any jobs the repo added (a Python test, a second npm root), with their check names, when you copy the current `security.yml` over an old one. Before patching an already-merged repo, check that its `security.yml` still matches what you prepared; stop on drift.
 
@@ -394,8 +406,8 @@ Run it per repository. Record pass or fail with the evidence (command output, ch
 **Files**
 - [ ] F1 Every file in section 4 step 3 exists at its path, and differs from the pinned template only where the PR body says why: `git diff --no-index "$SRT/<path>" <path>`.
 - [ ] F2 `security.yml` uses `--diff-filter=uxdb` and has a `zizmor` job: `grep -c zizmor .github/workflows/security.yml` is not 0.
-- [ ] F3 Every `uses:` is a 40-hex SHA: `grep -n 'uses:' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}'` prints nothing (local `./` actions aside).
-- [ ] F4 No workflow uses `pull_request_target`: `grep -rn pull_request_target .github/` prints nothing.
+- [ ] F3 Every `uses:` is a 40-hex SHA: `grep -nE '^\s*(-\s+)?uses:' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}'` prints nothing (local `./` actions aside). The template's comments and scripts mention `uses:` too; this pattern matches only YAML keys.
+- [ ] F4 No workflow triggers on `pull_request_target`: `grep -rnE '^\s*(-\s*)?pull_request_target\b' .github/` prints nothing. (Comments warning against it don't match.)
 - [ ] F5 The workflows' branch filter matches the default branch.
 
 **Hook** (in a throwaway repo, in each runtime that commits)
