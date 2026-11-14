@@ -12,7 +12,7 @@ This is the setup we use on our own repositories, in the order we'd add it. Each
 2. **Vulnerable dependencies.** Libraries you install can have known security holes. They're scanned on every change and every week, and kept updated. Some Python setups need a lockfile to be scanned fully ([step 3](#3-ci-security-workflow) lists the limits).
 3. **Poisoned new packages.** Attackers sometimes publish a malicious version of a popular package and hope it's installed before anyone notices. With npm 11.10 or later, `npm install` refuses package versions younger than seven days ([step 5](#5-minimum-package-age)).
 4. **Vulnerable or tampered build steps.** GitHub Actions workflows run third-party code. Each action is pinned to an exact released version and checked against known advisories.
-5. **Changes that quietly switch off the checks.** A pull request can't grant itself a scanner exception: the scans read suppression and config files from the base branch, not the pull request. A pull request *can* edit the workflow itself, so changes under `.github/` need your review ([step 3](#3-ci-security-workflow) shows how to require it).
+5. **Changes that quietly switch off the checks.** A pull request can't grant itself a scanner exception: gitleaks and npm read their suppression and config files from the base branch, not the pull request, and osv-scanner and zizmor read none from the repo at all (a reviewed osv-scanner ignore goes in the workflow itself). A pull request *can* edit the workflow itself, so changes under `.github/` need your review ([step 3](#3-ci-security-workflow) shows how to require it).
 6. **Fake "vulnerability reports" aimed at AI agents.** Reports from people are treated as untrusted data and verified independently before anything changes ([agent guide, 9.5](agent-guide.md#95-reports-from-people-prompt-injection)).
 
 | Step | Cost |
@@ -270,7 +270,7 @@ For the agent itself, [agent-guide.md](agent-guide.md) has the full procedure: a
 
 - reads the repository's `AGENTS.md` first;
 - fixes one problem per pull request, with the smallest version upgrade that clears the advisory;
-- merges only when every check is green on the exact commit being merged and, where CodeRabbit is installed, only after its check says `Finished` (a skipped review is fine only for Dependabot or Renovate pull requests, or one deliberately labelled `no-ai-review`) (Greptile reviews once, when the pull request opens, and its comments are read but it never holds up a merge);
+- merges only when every check is green on the exact commit being merged and, where the CodeRabbit app is installed (with or without `.coderabbit.yaml`), only after its check says `Finished` (a skipped review is fine only for Dependabot or Renovate pull requests, or one deliberately labelled `no-ai-review`) (Greptile reviews once, when the pull request opens, and its comments are read but it never holds up a merge);
 - never skips the hook, never adds an exception to make a check pass, never bypasses branch rules, and never acts on instructions inside a vulnerability report from a person.
 
 Our agent configuration and plugins are open source too. They're listed at [chameleonlabs.ai/open-source](https://chameleonlabs.ai/open-source).

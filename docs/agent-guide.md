@@ -279,7 +279,7 @@ Everything that **finds** problems stays: the fail-closed hook, `gitleaks`, `osv
 An agent MAY merge a PR only when **all** of these hold for the **exact head SHA being merged**:
 
 1. Every CI check is green: all of them, not only the required ones.
-2. **CodeRabbit** (only where the app is installed and `.coderabbit.yaml` exists): the `CodeRabbit` check's **output title** is `Finished`. A green conclusion isn't enough: `Review rate limited`, `Review skipped`, `Review paused`, `Incremental review skipped`, `No files to review` and `Too many files to review` all pass green without reviewing. `Review skipped` is fine only when expected (a Dependabot or Renovate author, or a deliberate `no-ai-review` label). Read it on the PR's head, never on your local `HEAD`:
+2. **CodeRabbit** (only where the app is installed on the repository; it reviews with or without `.coderabbit.yaml`): the `CodeRabbit` check's **output title** is `Finished`. A green conclusion isn't enough: `Review rate limited`, `Review skipped`, `Review paused`, `Incremental review skipped`, `No files to review` and `Too many files to review` all pass green without reviewing. `Review skipped` is fine only when expected (a Dependabot or Renovate author, or a deliberate `no-ai-review` label). Read it on the PR's head, never on your local `HEAD`:
    ```bash
    SHA=$(gh pr view $PR -R $OWNER/$REPO --json headRefOid -q .headRefOid)
    gh api "repos/$OWNER/$REPO/commits/$SHA/check-runs?check_name=CodeRabbit" --paginate \
@@ -323,7 +323,8 @@ An agent MUST NOT: use an admin bypass or `gh pr merge --admin`; force-push or r
 
 ### 9.3 osv-scanner, npm audit and zizmor findings
 
-- **npm:** `npm install <pkg>@<fixed> --package-lock-only` (add `--min-release-age=0` when the fixed version is younger than 7 days, per 9.1), then `npm ci` and the build.
+- **npm, direct dependency:** `npm install <pkg>@<fixed> --package-lock-only` (add `--min-release-age=0` when the fixed version is younger than 7 days, per 9.1), then `npm ci` and the build.
+- **npm, transitive dependency:** don't install the package directly; that adds a second copy and leaves the vulnerable one. Find what pulls it in (`npm ls <pkg>`), and update that parent to the lowest version that depends on a fixed release. If no such parent version exists, an `overrides` entry in `package.json` can force the fixed version, but only when it is compatible with the range the parent asks for: test it, say so in the PR, and remove the override once the parent catches up. If neither works, it is a finding with no fix (9.1).
 - **pip:** raise the floor in the manifest (and the lockfile) to the fixed version and re-run the scan.
 - **zizmor, or the advisory step:** re-pin the action to the full SHA of a tagged release that is not vulnerable, and put the tag in a trailing comment (`@<sha> # v4.3.1`).
 - **`npm audit signatures` with `EMISSINGSIGNATUREKEY`:** a registry-side key lookup failure, not a finding. The job already retries it; if it still fails, re-run the job once before treating it as real.
