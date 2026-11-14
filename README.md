@@ -18,9 +18,10 @@ Everything in the core setup is free. The optional parts (Snyk, Greptile, and Co
 | `.github/dependabot.yml` | Grouped updates with a 7-day cooldown. GitHub Actions on; npm and pip ready to uncomment. | Free |
 | `.npmrc` | `min-release-age=7`: npm refuses package versions younger than a week. | Free |
 | `.coderabbit.yaml` | Settings for the CodeRabbit reviewer, if you install it. | Free for public repos |
-| `.greptile/config.json` | Settings for the Greptile reviewer, if you install it. Held to the cheapest review tier. | Paid |
+| `.greptile/config.json` | Settings for the Greptile reviewer, if you install it. Held to the cheapest review tier. | Free for one developer; metered above that |
 | `.gitleaksignore` | Empty. Where reviewed false positives go. | — |
 | `SECURITY.md`, `CONTRIBUTING.md`, `AGENTS.md` | Starting points for your own policy, contributor guide and AI-agent guide. | — |
+| `docs/security-setup.md`, `docs/agent-guide.md` | The walkthrough for people (what each piece does, what it costs, how to undo it) and the procedure for AI coding agents. | — |
 
 ## Quick start
 
@@ -43,6 +44,8 @@ Everything in the core setup is free. The optional parts (Snyk, Greptile, and Co
 6. Edit `SECURITY.md` and the copyright line in `LICENSE`, and replace the project section of `AGENTS.md` with your own (keep its security rules). Delete `CHANGELOG.md`: it records this template's versions, not yours.
 
 The full walkthrough, with what each step costs and how to undo it, is in [docs/security-setup.md](docs/security-setup.md).
+
+Using an AI coding agent? Hand it [docs/agent-guide.md](docs/agent-guide.md): the step-by-step procedure for applying this setup to an existing repository, the settings commands, the merge rules, and how to handle each kind of finding.
 
 ## License
 
