@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-14
+
+- New agent guide (`docs/agent-guide.md`) for applying and running this setup with an AI coding agent.
+- The setup guide now explains what the setup protects against, what each part costs (prices as of 2026-11-14), and how to run it at zero cost.
+
 ### Changed
 - The action-advisory step reports an exhausted `GITHUB_TOKEN` rate limit (HTTP 403 or 429 with no quota left) with its own message instead of a generic HTTP error. The check still fails. Raised by CodeRabbit on lelandg/command-center#5.
 - `npm audit signatures` retries when the registry answers without a signing key (`EMISSINGSIGNATUREKEY`): up to 3 attempts, 15 s apart, with `--prefer-online` on the retries. Any other failure, including an invalid signature, fails on the first attempt. Ported from ChameleonLabs #465.
