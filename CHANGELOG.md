@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-20
+
+- Automatic merge commits and `git am` now run the same fail-closed gitleaks scan as `git commit`.
+- `push-to-checkout` no longer leaves the receiving worktree behind with `updateInstead`; disabled (non-executable) local hooks stay disabled on Linux and WSL; `applypatch-msg` delegating to `commit-msg` works again.
+- Snyk hook fixes: type changes count as staged source, interpreter paths with spaces, and a failed Snyk Code verdict survives an "unsupported project" retry.
+- Docs: one `--no-verify` rule for agents, accurate coverage claims, runnable shellcheck command.
+
 ## [0.1.1] - 2026-11-14
 
 - New agent guide (`docs/agent-guide.md`) for applying and running this setup with an AI coding agent.
