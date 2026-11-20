@@ -123,7 +123,7 @@ done | paste -sd: -)
 # gitleaks, so "absent" stays true.
 TOOLS=$(mktemp -d)
 trap 'rm -rf "$T" "$F" "$S" "$TOOLS"' EXIT INT TERM
-for c in git sh sed tr wc mktemp xargs cut head cat rm dirname date mkdir uname paste; do
+for c in git sh sed tr wc mktemp xargs cut head cat rm dirname date mkdir uname paste sort; do
   p=$(command -v "$c" 2>/dev/null) || continue
   case "$p" in /*) ;; *) continue ;; esac   # a shell builtin needs no PATH entry
   ( PATH="$NOGL"; command -v "$c" >/dev/null 2>&1 ) && continue
