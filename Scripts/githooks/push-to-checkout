@@ -1,5 +1,35 @@
 #!/bin/sh
-# push-to-checkout hook: no logic of its own. Chains to the repo-local .git/hooks/push-to-checkout if present.
+# push-to-checkout hook: chains to the repo-local .git/hooks/push-to-checkout,
+# and otherwise does what git does when no such hook exists.
+#
+# Git runs this on the RECEIVING side of a push to a checked-out branch with
+# receive.denyCurrentBranch=updateInstead. When the hook exists, git skips its
+# own "update the worktree if it is clean" step and leaves that to the hook --
+# so a pass-through that only chained left the branch moved and the worktree
+# and index at the old commit. With no local hook, this runs git's default:
+# refuse unless the worktree and index are clean, then read-tree the new
+# commit. It is the logic of git's own push-to-checkout.sample.
+# $1 is the commit the branch is being updated to.
 HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$HOOK_DIR/_lib.sh"
-chain_local_hook push-to-checkout "$@"
+
+chain_local_hook push-to-checkout "$@" || exit $?
+[ "$LOCAL_HOOK_RAN" = 1 ] && exit 0
+
+die() { log "push-to-checkout: $*"; exit 1; }
+
+git update-index -q --ignore-submodules --refresh \
+  || die "up-to-date check failed"
+git diff-files --quiet --ignore-submodules -- \
+  || die "the working tree has unstaged changes"
+# An unborn branch has no HEAD; compare against the empty tree instead.
+if git cat-file -e HEAD 2>/dev/null; then
+  head=HEAD
+else
+  head=$(git hash-object -t tree --stdin </dev/null)
+fi
+git diff-index --quiet --cached --ignore-submodules "$head" -- \
+  || die "the working tree has staged changes"
+git read-tree -u -m "$1" \
+  || die "could not update the working tree to the new HEAD"
+exit 0

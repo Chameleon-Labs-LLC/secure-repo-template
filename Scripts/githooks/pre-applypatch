@@ -1,5 +1,44 @@
 #!/bin/sh
-# pre-applypatch hook: no logic of its own. Chains to the repo-local .git/hooks/pre-applypatch if present.
+# pre-applypatch hook: the secret gate for `git am`, and for `git rebase
+# --apply`, which replays commits through `git am`.
+# Git runs this hook, not pre-commit, after `git am` applies a patch and
+# before it commits it. Without a scan here, a mailed or format-patch patch
+# carrying a secret entered history unscanned. The applied patch is in the
+# index at this point, so the same staged scan pre-commit runs reads exactly
+# what is about to be committed.
+#
+# Snyk does not run here: a patch is reviewed and tested where it was made.
+# `git am --no-verify` (on git versions that have the flag) skips this hook,
+# as --no-verify skips pre-commit; the same rules apply to it.
 HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$HOOK_DIR/_lib.sh"
-chain_local_hook pre-applypatch "$@"
+
+# What to tell the user when the patch is refused. A rebase with the apply
+# backend stops inside `git am`, but must be resumed with `git rebase`, which
+# also restores the branch; `git am --continue` would not.
+if [ -f "$(git rev-parse --git-path rebase-apply)/rebasing" ]; then
+  RESUME="'git rebase --continue' (after staging the fix), 'git rebase --skip', or 'git rebase --abort'"
+else
+  RESUME="'git am --continue' (after staging the fix), 'git am --skip', or 'git am --abort'"
+fi
+
+# `git am` commits the index it holds IN MEMORY, read before this hook ran;
+# unlike `git merge`, it does not re-read the index file afterwards. So if a
+# local hook re-stages files, the gate below would scan the new index on disk
+# while git commits the old one. Refuse that case: the user stages what they
+# want and resumes, and git then loads the index it is going to commit.
+before=$(git write-tree 2>/dev/null) || before=
+chain_local_hook pre-applypatch "$@" || exit $?
+if [ "$LOCAL_HOOK_RAN" = 1 ]; then
+  after=$(git write-tree 2>/dev/null) || after=
+  if [ -z "$before" ] || [ "$before" != "$after" ]; then
+    log "the repo's own pre-applypatch hook changed the staged files, but git am commits the index it read before that hook ran, so the scan could not see what would be committed. Patch not committed: review the staged changes, then run $RESUME"
+    exit 1
+  fi
+fi
+
+if ! ( . "$HOOK_DIR/_secret_gate.sh" ); then
+  log "patch not committed, and the patch is still applied. Fix it, then run $RESUME"
+  exit 1
+fi
+exit 0

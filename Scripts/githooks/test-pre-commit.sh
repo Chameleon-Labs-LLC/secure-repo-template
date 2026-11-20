@@ -116,6 +116,20 @@ NOGL=$(printf '%s\n' "$PATH" | tr ':' '\n' | while IFS= read -r d; do
   [ -n "$d" ] || continue
   [ -x "$d/gitleaks" ] || [ -x "$d/gitleaks.exe" ] || printf '%s\n' "$d"
 done | paste -sd: -)
+# Dropping a gitleaks directory can drop git and coreutils with it: on a host
+# where gitleaks was installed to /usr/bin, NOGL lost everything and T21-T23
+# failed before the hook ran. So every command the gate needs that NOGL lost
+# comes back through a one-line wrapper in its own directory -- which holds no
+# gitleaks, so "absent" stays true.
+TOOLS=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$S" "$TOOLS"' EXIT INT TERM
+for c in git sh sed tr wc mktemp xargs cut head cat rm dirname date mkdir uname paste sort; do
+  p=$(command -v "$c" 2>/dev/null) || continue
+  case "$p" in /*) ;; *) continue ;; esac   # a shell builtin needs no PATH entry
+  ( PATH="$NOGL"; command -v "$c" >/dev/null 2>&1 ) && continue
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$p" > "$TOOLS/$c"; chmod +x "$TOOLS/$c"
+done
+NOGL="$TOOLS${NOGL:+:$NOGL}"
 
 # Every case below asserts the hook's own message, not just the exit code.
 # Exit code alone is not enough: if NOGL were missing git, or still had a
@@ -132,7 +146,7 @@ printf 'hello\n' > "$T/ok.txt"; g add ok.txt
 # "absent" has to mean absent from PATH *and* from the fallback, or T21-T23
 # would silently stop exercising the fail-closed branch.
 BAREHOME=$(mktemp -d)
-trap 'rm -rf "$T" "$F" "$S" "$BAREHOME"' EXIT INT TERM
+trap 'rm -rf "$T" "$F" "$S" "$TOOLS" "$BAREHOME"' EXIT INT TERM
 
 # Guard: NOGL must really be "git yes, gitleaks no", or these three cannot run.
 if ! ( PATH="$NOGL"; export PATH; command -v git >/dev/null 2>&1 ); then
@@ -167,7 +181,7 @@ reset_tree
 # ~/.local/bin, while the binary is installed there. Before the fallback the
 # hook called that "absent" and fail-closed blocked the commit.
 FAKEHOME=$(mktemp -d)
-trap 'rm -rf "$T" "$F" "$S" "$BAREHOME" "$FAKEHOME"' EXIT INT TERM
+trap 'rm -rf "$T" "$F" "$S" "$TOOLS" "$BAREHOME" "$FAKEHOME"' EXIT INT TERM
 mkdir -p "$FAKEHOME/.local/bin"
 GLREAL=$(command -v gitleaks || true)
 if [ -z "$GLREAL" ] && [ -x "$HOME/.local/bin/gitleaks" ]; then
@@ -249,14 +263,16 @@ expect "T18 non-ASCII manifest dir -> listed unquoted for the manifest scan" "$(
 # A copy of the hook runs from a temp dir: the usage counters write next to
 # the hook, and the canonical tree must stay clean.
 HK=$(mktemp -d); STUB=$(mktemp -d); LOG="$STUB/calls"
-cp "$HOOK" "$HERE/_lib.sh" "$HK/"
+cp "$HOOK" "$HERE/_lib.sh" "$HERE/_secret_gate.sh" "$HK/"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$LOG" > "$STUB/snyk"; chmod +x "$STUB/snyk"; : > "$LOG"
 g config core.hooksPath "$HK"
 STAMPF="$(g rev-parse --absolute-git-dir)/snyk-code-stamp"; rm -f "$STAMPF"
 printf '# docs\n' > "$T/README.md"; g add README.md
-PATH="$STUB:$PATH" SNYK_HOOK_MODE=warn g hook run pre-commit >/dev/null 2>&1
+PATH="$STUB:$PATH" SNYK_HOOK_MODE=warn g hook run pre-commit >/dev/null 2>&1; rc=$?
 ran=$(grep -c '^code test' "$LOG" 2>/dev/null); [ -f "$STAMPF" ] && st=1 || st=0
-expect "T19 docs-only commit -> no Code run, no stamp" "$ran$st" 00; reset_tree
+# rc too: a hook that rejected the commit before reaching Snyk would also show
+# no Code run and no stamp, and pass on those alone.
+expect "T19 docs-only commit -> passes, no Code run, no stamp" "$rc$ran$st" 000; reset_tree
 : > "$LOG"   # count only this case's calls
 printf 'export const z = 3\n' > "$T/z.ts"; g add z.ts
 PATH="$STUB:$PATH" SNYK_HOOK_MODE=warn g hook run pre-commit >/dev/null 2>&1
@@ -334,8 +350,16 @@ chmod -x "$LOCALHOOKS/pre-commit" 2>/dev/null
 if [ -x "$LOCALHOOKS/pre-commit" ]; then
   pass "T30a skipped: this filesystem will not clear the execute bit"
 else
-  rc=$( PATH="$STUB:$PATH" SNYK_HOOK_MODE=off g hook run pre-commit >/dev/null 2>&1; echo $? )
-  expect "T30a non-executable repo-local hook -> still chained, via the sh fallback" "$rc" 43
+  out=$( PATH="$STUB:$PATH" SNYK_HOOK_MODE=off g hook run pre-commit 2>&1 ); rc=$?
+  # git itself treats a non-executable hook as disabled everywhere but Git for
+  # Windows, which cannot store the mode; the chain must do the same.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      expect "T30a non-executable repo-local hook (Windows) -> chained via the sh fallback" "$rc" 43 ;;
+    *)
+      expect "T30a non-executable repo-local hook -> skipped, as git would" "$rc" 0
+      saw "T30b ... and says why" "$out" "is not executable" ;;
+  esac
 fi
 rm -rf "$LOCALHOOKS"; reset_tree
 
@@ -532,8 +556,11 @@ mkdir -p "$T/notes"
 if printf 'token = "%s"\n' "$attrtok" > "$T/$nlname" 2>/dev/null && [ -f "$T/$nlname" ]; then
   printf '* -diff\n' > "$T/.gitattributes"
   g add -A
-  rc=$(SNYK_HOOK_MODE=off g hook run pre-commit >/dev/null 2>&1; echo $?)
+  out=$(SNYK_HOOK_MODE=off g hook run pre-commit 2>&1); rc=$?
   expect "T33f secret in a filename containing a newline -> blocked" "$rc" 1
+  # A lookup that broke only for this name would block on a READ error and
+  # still exit 1. Only the finding proves the bytes were scanned.
+  saw "T33f1 ... as a finding, not a read failure" "$out" "found a secret in the staged bytes"
 else
   pass "T33f skipped: this filesystem will not create a newline filename"
 fi
@@ -794,6 +821,183 @@ else
   fail "T33s unrunnable: this filesystem did not stage a file named [A].bin"
 fi
 reset_tree
+
+
+# --- the gate on the commits git makes WITHOUT pre-commit -----------------
+# An automatic merge commit runs pre-merge-commit, and `git am` runs
+# pre-applypatch; neither runs pre-commit. Both used to be pass-throughs, so a
+# branch or a patch carrying a secret entered history unscanned. Each case has
+# its own paths, and the leaky commits are made with --no-verify on purpose:
+# that is the "committed past the hook, or on another machine" situation.
+g config core.hooksPath "$HERE"
+BASE=$(g symbolic-ref --short HEAD)
+mtok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+
+g checkout -q -b t34-leaky
+printf 'token = "%s"\n' "$mtok" > "$T/t34.txt"; g add t34.txt; g commit -q --no-verify -m t34-leak
+g checkout -q "$BASE"
+before=$(g rev-parse HEAD)
+out=$(g merge --no-ff --no-edit t34-leaky 2>&1); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T34 automatic merge of a branch holding a secret -> refused" "$rc" 1
+saw "T34a ... by the secret gate" "$out" "found a secret"
+expect "T34b ... and no merge commit was made" "$(g rev-parse HEAD)" "$before"
+g merge --abort 2>/dev/null; reset_tree
+
+g checkout -q -b t35-clean
+printf 'clean\n' > "$T/t35.txt"; g add t35.txt; g commit -q --no-verify -m t35-clean
+g checkout -q "$BASE"
+g merge --no-ff --no-edit t35-clean >/dev/null 2>&1; rc=$?
+expect "T35 automatic merge of a clean branch -> passes" "$rc" 0
+expect "T35a ... and HEAD is the merge commit" "$(g rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" 3
+reset_tree
+
+PD=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$S" "$TOOLS" "$BAREHOME" "$FAKEHOME" "$PD"' EXIT INT TERM
+g checkout -q -b t36-src
+printf 'token = "%s"\n' "$mtok" > "$T/t36.txt"; g add t36.txt; g commit -q --no-verify -m t36-leak
+printf 'clean\n' > "$T/t37.txt"; g add t37.txt; g commit -q --no-verify -m t37-clean
+g format-patch -q -2 -o "$PD" >/dev/null
+g checkout -q "$BASE"
+p36=$(ls "$PD"/0001-* 2>/dev/null); p37=$(ls "$PD"/0002-* 2>/dev/null)
+if [ -z "$p36" ] || [ -z "$p37" ]; then
+  fail "T36-T37 unrunnable: format-patch produced no patches"
+else
+  before=$(g rev-parse HEAD)
+  out=$(g am -q "$p36" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] && rc=1
+  expect "T36 git am of a patch holding a secret -> refused" "$rc" 1
+  saw "T36a ... by the secret gate" "$out" "found a secret"
+  expect "T36b ... and nothing was committed" "$(g rev-parse HEAD)" "$before"
+  g am --abort >/dev/null 2>&1; rc=$?
+  expect "T36c ... and git am --abort recovers" "$rc" 0
+  reset_tree
+  g am -q "$p37" >/dev/null 2>&1; rc=$?
+  expect "T37 git am of a clean patch -> passes" "$rc" 0
+  expect "T37a ... and the patch was committed" "$(g log -1 --format=%s)" "t37-clean"
+fi
+reset_tree
+
+# --- textconv: the patch scan reads converted text ------------------------
+# A diff driver with a textconv shows gitleaks the CONVERTED file, and
+# --numstat still prints counts, so the render check never selected it. A
+# driver that drops the credential from its output hid it from both scans.
+# Like the smudge case (T33p), it needs a driver in local config.
+reset_tree
+g config diff.t40hide.textconv "sed -e s/ghp_[A-Za-z0-9]*/REDACTED/"
+mkdir -p "$T/t40"
+printf 't40/*.md diff=t40hide\n' > "$T/.gitattributes"
+printf 'token = "%s"\n' "$mtok" > "$T/t40/conf.md"
+g add .gitattributes t40/conf.md
+case "$(g diff --cached -- t40/conf.md)" in
+  *"$mtok"*) fail "T40 unrunnable: the textconv driver did not hide the token from the diff" ;;
+  *)
+    out=$(SNYK_HOOK_MODE=off g hook run pre-commit 2>&1); rc=$?
+    expect "T40 secret hidden by a textconv driver -> blocked" "$rc" 1
+    saw "T40a ... as a finding in the staged bytes" "$out" "found a secret in the staged bytes" ;;
+esac
+g config --unset diff.t40hide.textconv
+reset_tree
+
+# --- git am commits the index it read BEFORE pre-applypatch ---------------
+# So a local pre-applypatch that re-stages files would have the gate scan an
+# index git does not commit. The wrapper refuses that case outright.
+g checkout -q -b t41-src "$BASE"
+printf 'clean\n' > "$T/t41.txt"; g add t41.txt; g commit -q --no-verify -m t41-clean
+rm -f "$PD"/*.patch; g format-patch -q -1 -o "$PD" >/dev/null
+g checkout -q "$BASE"
+LOCALHOOKS="$(g rev-parse --absolute-git-dir)/hooks"; mkdir -p "$LOCALHOOKS"
+printf '#!/bin/sh\nprintf "restaged\\n" >> t41.txt && git add t41.txt\n' > "$LOCALHOOKS/pre-applypatch"
+chmod +x "$LOCALHOOKS/pre-applypatch"
+before=$(g rev-parse HEAD)
+out=$( cd "$T" && git am -q "$PD"/0001-*.patch 2>&1 ); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T41 local pre-applypatch re-stages files -> refused" "$rc" 1
+saw "T41a ... and says why" "$out" "changed the staged files"
+expect "T41b ... and nothing was committed" "$(g rev-parse HEAD)" "$before"
+g am --abort >/dev/null 2>&1
+rm -rf "$LOCALHOOKS"; reset_tree
+
+# --- git rebase --apply replays through git am, so the gate runs there ---
+g checkout -q -b t42-leaky "$BASE"
+printf 'token = "%s"\n' "$mtok" > "$T/t42.txt"; g add t42.txt; g commit -q --no-verify -m t42-leak
+g checkout -q "$BASE"
+printf 'moved\n' > "$T/t42base.txt"; g add t42base.txt; g commit -q --no-verify -m t42-base
+g checkout -q t42-leaky
+before=$(g rev-parse HEAD)
+out=$( cd "$T" && git rebase --apply "$BASE" 2>&1 ); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T42 rebase --apply of a commit holding a secret -> stopped" "$rc" 1
+saw "T42a ... by the secret gate" "$out" "found a secret"
+saw "T42b ... and points at git rebase to recover, not git am" "$out" "git rebase --abort"
+g rebase --abort >/dev/null 2>&1
+expect "T42c ... and rebase --abort restores the branch" "$(g rev-parse HEAD)" "$before"
+g checkout -q "$BASE"; reset_tree
+
+# --- the chain's recursion guard is per hook name -------------------------
+# git's applypatch-msg sample calls `$(git rev-parse --git-path hooks/commit-msg)`,
+# which under core.hooksPath is the commit-msg WRAPPER. With a single on/off
+# guard the wrapper then skipped the local commit-msg, so git am lost its
+# message validation. 44 proves the local commit-msg ran.
+LOCALHOOKS="$(g rev-parse --absolute-git-dir)/hooks"; mkdir -p "$LOCALHOOKS"
+printf '#!/bin/sh\nexec "$(git rev-parse --git-path hooks/commit-msg)" "$@"\n' > "$LOCALHOOKS/applypatch-msg"
+printf '#!/bin/sh\nexit 44\n' > "$LOCALHOOKS/commit-msg"
+chmod +x "$LOCALHOOKS/applypatch-msg" "$LOCALHOOKS/commit-msg"
+printf 'msg\n' > "$PD/msg"
+g hook run applypatch-msg -- "$PD/msg" >/dev/null 2>&1; rc=$?
+expect "T38 applypatch-msg delegating to commit-msg -> the local commit-msg still runs" "$rc" 44
+# ...while a hook that calls its OWN wrapper must not loop.
+printf '#!/bin/sh\nexec "$(git rev-parse --git-path hooks/commit-msg)" "$@"\n' > "$LOCALHOOKS/commit-msg"
+chmod +x "$LOCALHOOKS/commit-msg"
+g hook run commit-msg -- "$PD/msg" >/dev/null 2>&1; rc=$?
+expect "T38a local commit-msg calling its own wrapper -> no recursion" "$rc" 0
+rm -rf "$LOCALHOOKS"; reset_tree
+
+# --- push-to-checkout keeps git's default when there is no local hook ----
+# With receive.denyCurrentBranch=updateInstead, git leaves the worktree update
+# to this hook whenever the hook exists, so a pass-through moved the branch and
+# left the checkout behind. The pushing side runs with no hooks at all, so only
+# the receiving side's hooks are under test.
+RCV=$(mktemp -d); SND=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$S" "$TOOLS" "$BAREHOME" "$FAKEHOME" "$PD" "$RCV" "$SND"' EXIT INT TERM
+git init -q "$RCV"
+git -C "$RCV" config user.email t@t.local; git -C "$RCV" config user.name t
+git -C "$RCV" config core.hooksPath "$HERE"
+git -C "$RCV" config receive.denyCurrentBranch updateInstead
+printf 'one\n' > "$RCV/t39.txt"; git -C "$RCV" add t39.txt; git -C "$RCV" commit -q --no-verify -m one
+# The sender gets an empty hooks dir from the clone on: its fixture commits must
+# not run the developer's global hooks either (a global prepare-commit-msg
+# runs even with --no-verify), or T39 fails before the receiver is tested.
+NOHOOKS="$SND/nohooks"; mkdir -p "$NOHOOKS"
+# `git -c ... clone`, then local config: `git clone -c core.hooksPath=` is
+# refused by git's clone protection (2.45+).
+git -c core.hooksPath="$NOHOOKS" clone -q "$RCV" "$SND/c"
+git -C "$SND/c" config core.hooksPath "$NOHOOKS"
+git -C "$SND/c" config user.email t@t.local; git -C "$SND/c" config user.name t
+printf 'two\n' > "$SND/c/t39.txt"; git -C "$SND/c" commit -q --no-verify -am two
+git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push -q origin HEAD >/dev/null 2>&1; rc=$?
+expect "T39 push to a clean checked-out branch -> accepted" "$rc" 0
+expect "T39a ... and the receiving worktree was updated" "$(tr -d '\r' < "$RCV/t39.txt")" two
+printf 'dirty\n' > "$RCV/t39.txt"
+printf 'three\n' > "$SND/c/t39.txt"; git -C "$SND/c" commit -q --no-verify -am three
+out=$(git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push origin HEAD 2>&1); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T39b push onto a dirty checkout -> refused" "$rc" 1
+# The wrapper's own prefix: git's built-in updateInstead says "unstaged
+# changes" too, so without this the case passed with no wrapper at all.
+saw "T39c ... by the wrapper's fallback, not git's built-in one" "$out" "githooks: push-to-checkout: the working tree has unstaged changes"
+# A local push-to-checkout still owns the decision when there is one.
+git -C "$RCV" checkout -q -- t39.txt
+mkdir -p "$RCV/.git/hooks"
+printf '#!/bin/sh
+echo t39-local-hook >&2
+exit 1
+' > "$RCV/.git/hooks/push-to-checkout"
+chmod +x "$RCV/.git/hooks/push-to-checkout"
+out=$(git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push origin HEAD 2>&1); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T39d a local push-to-checkout is chained, and its refusal stands" "$rc" 1
+saw "T39e ... and it was the local hook that ran" "$out" "t39-local-hook"
 
 [ "$FAIL" -eq 0 ] && echo "all cases pass" || echo "FAILURES above"
 exit "$FAIL"
