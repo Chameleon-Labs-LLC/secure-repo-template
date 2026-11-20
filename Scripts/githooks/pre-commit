@@ -253,6 +253,10 @@ if [ -n "$MANIFESTS" ]; then
         fi
         case "$(basename "$m")" in
           requirements*.txt)
+            # Snyk recognises only the exact name requirements.txt on its own;
+            # any other name (requirements-dev.txt) needs the package manager
+            # named, or the file is not tested at all.
+            [ "$(basename "$m")" = requirements.txt ] || set -- "$@" --package-manager=pip
             if [ "${PIP_OK:-0}" != 1 ]; then
               log "$m: not installing it to test it (a package build runs arbitrary code); testing against host packages. SNYK_HOOK_PIP_INSTALL=1 to opt in"
             else
@@ -348,11 +352,11 @@ else
       0) echo "$TODAY" > "$STAMP"; CODE_FAIL=0 ;;
       1) echo "$TODAY:fail" > "$STAMP"; log "Snyk Code found $SEVERITY+ issues"; CODE_FAIL=1 ;;
       # 3 is "no supported project detected": no scan completed, so it is no
-      # verdict. It must not clear today's saved failure (CODE_FAIL was seeded
-      # above): a forced retry that hit 3 used to pass a known finding in
-      # block mode, and stamp the day clean so later commits skipped the scan.
-      3) log "Snyk Code: no supported files, skipped"
-         [ "$CODE_FAIL" -eq 1 ] || echo "$TODAY" > "$STAMP" ;;
+      # verdict, and the stamp is left exactly as it was. Writing a clean stamp
+      # cleared today's saved failure (a forced retry that hit 3 passed a known
+      # finding in block mode), and on a first run it made every later commit
+      # that day skip the scan, though none had completed.
+      3) log "Snyk Code: no supported files, skipped" ;;
       *) log "Snyk Code error (exit $rc), not blocking" ;;
     esac
   fi

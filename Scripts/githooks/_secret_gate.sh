@@ -3,7 +3,8 @@
 # hook that runs just before git writes a commit from the index:
 #   pre-commit        git commit (and a conflicted merge, committed by hand)
 #   pre-merge-commit  an automatic merge commit -- git does NOT run pre-commit
-#   pre-applypatch    git am -- git does NOT run pre-commit either
+#   pre-applypatch    git am, and git rebase --apply (it replays via am) --
+#                     git does NOT run pre-commit either
 # Before this file existed only pre-commit scanned, so a merge of a branch
 # holding a secret, or a mailed patch holding one, entered history unscanned.
 #
@@ -15,7 +16,8 @@
 # GITLEAKS_DEGRADED_OK applies here unchanged.
 #
 # Not covered by any client-side hook, by git's design: cherry-pick, revert,
-# rebase and stash replay commits without running these hooks. CI's gitleaks
+# the default (merge-backend) rebase and stash replay commits without running
+# these hooks. CI's gitleaks
 # job is the gate there. `--no-verify` on commit, merge or am skips this file.
 
 TOP=$(git rev-parse --show-toplevel)
@@ -112,13 +114,17 @@ if [ -n "$GITLEAKS" ]; then
   NULS=
   BINRAW=
   BINTXT=
+  STAGED=
+  TCATTR=
   UNRENDERED=$(mktemp 2>/dev/null) || UNRENDERED=
   NUMSTAT=$(mktemp 2>/dev/null) || NUMSTAT=
   NULS=$(mktemp 2>/dev/null) || NULS=
   BINRAW=$(mktemp 2>/dev/null) || BINRAW=
   BINTXT=$(mktemp 2>/dev/null) || BINTXT=
+  STAGED=$(mktemp 2>/dev/null) || STAGED=
+  TCATTR=$(mktemp 2>/dev/null) || TCATTR=
   if [ -z "$UNRENDERED" ] || [ -z "$NUMSTAT" ] || [ -z "$NULS" ] \
-     || [ -z "$BINRAW" ] || [ -z "$BINTXT" ]; then
+     || [ -z "$BINRAW" ] || [ -z "$BINTXT" ] || [ -z "$STAGED" ] || [ -z "$TCATTR" ]; then
     gitleaks_degraded "could not create the temp files needed to find the staged files git cannot diff, so they are unscanned" "Free up TMPDIR"
   else
     # No other trap is set in this hook; these remove only these paths.
@@ -137,7 +143,7 @@ if [ -n "$GITLEAKS" ]; then
     # trap's final status can surface as the script's own. Keep the `:` so the
     # handler's exit status never depends on what its last command happens to
     # be.
-    trap 'rm -f "$UNRENDERED" "$NUMSTAT" "$NULS" "$BINRAW" "$BINTXT"; :' EXIT
+    trap 'rm -f "$UNRENDERED" "$NUMSTAT" "$NULS" "$BINRAW" "$BINTXT" "$STAGED" "$TCATTR"; :' EXIT
     trap 'log "interrupted during the secret scan, so the staged changes are not fully scanned; commit blocked"; exit 1' INT TERM
     # ACMRT, not ACMR: T is a TYPE change (symlink <-> regular file), and
     # omitting it let a symlink replaced by a diff-suppressed regular file skip
@@ -163,6 +169,35 @@ if [ -n "$GITLEAKS" ]; then
     gitrc=$?
     sed -z -n 's/^-\t-\t//p' < "$NUMSTAT" > "$UNRENDERED" 2>/dev/null
     sedrc=$?
+    # Paths git diffs THROUGH A TEXTCONV DRIVER join the raw scan too. The scan
+    # above reads the converted text, and a driver that leaves a credential out
+    # of its output hides it while --numstat still prints real counts, so the
+    # render check alone never selects the file. Like the smudge case below,
+    # this needs a driver in local config, not just the repo -- but a gate
+    # must read what it is gating. Only drivers that HAVE a textconv count: a
+    # funcname-only `diff=python` changes nothing about what gitleaks reads.
+    # check-attr without --cached reads the worktree .gitattributes, which is
+    # what `git diff --cached` itself uses (see the render-check note above).
+    # Each step goes through a file, for the reason given at `tr` below.
+    git diff --cached --name-only -z --no-renames --diff-filter=ACMRT > "$STAGED" 2>/dev/null
+    namerc=$?
+    git check-attr -z --stdin diff < "$STAGED" > "$NULS" 2>/dev/null
+    attrrc=$?
+    # -z triples (path, attr, value) become one "value<TAB>path" record each.
+    # Under -z, G joins with the record separator -- a NUL, not a newline --
+    # so the first NUL is the join point; a path cannot contain one.
+    sed -z -n 'h;n;n;G;s/\x00/\t/p' < "$NULS" > "$TCATTR" 2>/dev/null
+    tcrc=$?
+    while IFS= read -r tckey; do
+      [ -n "$tckey" ] || continue
+      tcdrv=${tckey#diff.}; tcdrv=${tcdrv%.textconv}
+      tcre=$(printf '%s' "$tcdrv" | sed 's/[]\/$*.^[]/\\&/g')
+      sed -z -n "s/^$tcre\t//p" < "$TCATTR" >> "$UNRENDERED" 2>/dev/null || tcrc=$?
+    done <<TCDRIVERS
+$(git config --name-only --get-regexp '^diff\..*\.textconv$' 2>/dev/null)
+TCDRIVERS
+    # A file can be both unrenderable and textconv'd; scan it once.
+    sort -z -u -o "$UNRENDERED" "$UNRENDERED" 2>/dev/null || tcrc=$?
     # Through a file, because a pipeline reports only its LAST command: a first
     # `tr` that failed to read the list left `wc` counting empty input and
     # printing 0, the numeric check accepted it, and the scan was skipped --
@@ -175,6 +210,10 @@ if [ -n "$GITLEAKS" ]; then
       gitleaks_degraded "could not count the staged files git cannot diff (tr exit $trrc), so any such file is unscanned" "Check that tr works"
     elif [ "$gitrc" -ne 0 ]; then
       gitleaks_degraded "git could not list which staged files it cannot diff (exit $gitrc), so any such file is unscanned" "Fix the git error"
+    elif [ "$namerc" -ne 0 ] || [ "$attrrc" -ne 0 ]; then
+      gitleaks_degraded "git could not list which staged files use a textconv driver (exit $namerc/$attrrc), so any such file is not scanned as staged bytes" "Fix the git error"
+    elif [ "$tcrc" -ne 0 ]; then
+      gitleaks_degraded "could not select the staged files that use a textconv driver (exit $tcrc), so any such file is not scanned as staged bytes" "Make sure GNU sed and sort are on PATH"
     elif [ "$sedrc" -ne 0 ]; then
       gitleaks_degraded "could not select the staged files git cannot diff (sed exit $sedrc), so any such file is unscanned" "Make sure GNU sed is on PATH"
     else
@@ -185,7 +224,7 @@ if [ -n "$GITLEAKS" ]; then
       esac
     fi
     if [ "${WANT:-0}" -gt 0 ]; then
-      log "git could not render $WANT staged file(s) as text, so the scan above did not read them; scanning their staged bytes directly:"
+      log "git could not render $WANT staged file(s) as text, or renders them through a textconv filter, so the scan above did not read their real bytes; scanning their staged bytes directly:"
       tr '\0' '\n' < "$UNRENDERED" | sed 's/^/          /' >&2
       # Read the STAGED BLOBS, never a checkout. `git checkout-index` applies
       # checkout conversions, smudge filters among them, so it can hand back

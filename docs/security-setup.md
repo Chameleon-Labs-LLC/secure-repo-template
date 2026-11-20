@@ -41,9 +41,9 @@ A template copies **files only**. Repository settings, rulesets and installed ap
 
 ## 2. Pre-commit hook: gitleaks, fails closed
 
-The hooks scan the staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before git writes a commit: `pre-commit` for `git commit`, `pre-merge-commit` for a merge commit git creates itself, and `pre-applypatch` for `git am`. All three run the same gate, `Scripts/githooks/_secret_gate.sh`. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
+The hooks scan the staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before git writes a commit: `pre-commit` for `git commit`, `pre-merge-commit` for a merge commit git creates itself, and `pre-applypatch` for `git am` (which also covers `git rebase --apply`, since that backend replays commits through `git am`). All three run the same gate, `Scripts/githooks/_secret_gate.sh`. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
 
-It covers only machines where it is installed and active (a repo with its own `core.hooksPath` overrides a global install, see below). And git runs no hook before `git cherry-pick`, `git revert`, `git rebase` or `git stash` writes a commit, so those are covered by CI alone. They replay commits that were usually scanned when first made; the exposure is content fetched from elsewhere.
+It covers only machines where it is installed and active (a repo with its own `core.hooksPath` overrides a global install, see below). And git runs no hook before `git cherry-pick`, `git revert`, `git rebase` with the default merge backend, or `git stash` writes a commit, so those are covered by CI alone. They replay commits that were usually scanned when first made; the exposure is content fetched from elsewhere.
 
 It **fails closed**:
 
@@ -127,7 +127,7 @@ Two things to know:
 | A false positive | Add a `gitleaks:allow` comment on the line, or add the fingerprint gitleaks prints to `.gitleaksignore`. CI ignores `gitleaks:allow`, and on a pull request it uses the base branch's `.gitleaksignore`, so merge the `.gitleaksignore` entry first, in its own PR. |
 | gitleaks missing or broken | Fix the install. For one commit only, `GITLEAKS_DEGRADED_OK=1 git commit ...` passes a scan that could not run (never a found secret). Say why in the commit message. |
 
-`--no-verify` on `git commit`, `git merge` or `git am` skips the scan. Treat needing it as a problem to fix, not a habit. Agents must not use it at all.
+`--no-verify` on `git commit`, `git merge` or `git am` (newer git versions only have it for `am`) skips the scan. Treat needing it as a problem to fix, not a habit. Agents must not use it at all.
 
 **Test the hook** (needs `git` 2.36+, `node` and `gitleaks`; spends no Snyk quota):
 

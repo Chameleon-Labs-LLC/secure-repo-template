@@ -48,7 +48,7 @@ Out of scope: application security, cloud IAM, and secret rotation itself (the h
 
 | Component | Path | Runs when | Blocks? |
 |---|---|---|---|
-| Pre-commit hook (gitleaks, optional Snyk) | `Scripts/githooks/pre-commit`, with `_secret_gate.sh`, `_lib.sh`, the chain stubs and `install.sh` | Every `git commit`, automatic merge commit (`pre-merge-commit`) and `git am` (`pre-applypatch`) on a machine where it is installed. Not cherry-pick, revert, rebase or stash: git runs no hook there | Yes for secrets, fail-closed. Snyk defaults to `warn` |
+| Pre-commit hook (gitleaks, optional Snyk) | `Scripts/githooks/pre-commit`, with `_secret_gate.sh`, `_lib.sh`, the chain stubs and `install.sh` | Every `git commit`, automatic merge commit (`pre-merge-commit`) and `git am` (`pre-applypatch`) on a machine where it is installed. `git rebase --apply` is covered through `git am`. Not cherry-pick, revert, the default (merge-backend) rebase or stash: git runs no hook there | Yes for secrets, fail-closed. Snyk defaults to `warn` |
 | Hook self-test and shellcheck | `.github/workflows/githooks.yml` | Every PR, push to `main`, manual | Yes, if required |
 | Scans: `gitleaks`, `osv-scanner`, `zizmor`, `npm audit`, `npm audit signatures` | `.github/workflows/security.yml` | Every PR, push to `main`, weekly (Mondays 11:17 UTC), manual | Yes, if required |
 | Dependabot | `.github/dependabot.yml` plus two repo settings | Weekly and on advisories | No (opens PRs) |
@@ -122,7 +122,7 @@ What an agent MUST know about the hook:
 - A found secret blocks. **No variable passes a finding.**
 - A missing gitleaks (looked for on `PATH`, then `~/.local/bin`) or an errored scan also blocks. `GITLEAKS_DEGRADED_OK=1` (the exact value `1`) passes **only** a degraded scan, for one commit, and the commit message MUST say why. An agent MUST NOT set it without telling the human.
 - `SNYK_SKIP=1` skips Snyk only. `SNYK_HOOK_MODE=warn|block|off` (default `warn`). Snyk Open Source runs only when a manifest's dependency fields or a lockfile's resolved tree change (a `"version"` bump doesn't count); Snyk Code at most once per repo per day, when source files are staged.
-- `--no-verify` (on `git commit`, `git merge` or `git am`) skips the scan. An agent MUST NOT use it.
+- `--no-verify` (on `git commit`, `git merge` or `git am`; newer git versions only have it for `am`) skips the scan. An agent MUST NOT use it.
 - The hook chains to the repo's own `.git/hooks/<name>`, running a local `pre-commit` **first**, so a formatter that re-stages files runs before the scan.
 - Supported: Linux, WSL, Git Bash. **Not macOS** (GNU `sed -z`, `sed -i`, `xargs -r`).
 - Self-test: `sh Scripts/githooks/test-pre-commit.sh` (needs git 2.36+, node and gitleaks; spends no Snyk quota).

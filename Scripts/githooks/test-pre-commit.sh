@@ -878,6 +878,62 @@ else
 fi
 reset_tree
 
+# --- textconv: the patch scan reads converted text ------------------------
+# A diff driver with a textconv shows gitleaks the CONVERTED file, and
+# --numstat still prints counts, so the render check never selected it. A
+# driver that drops the credential from its output hid it from both scans.
+# Like the smudge case (T33p), it needs a driver in local config.
+reset_tree
+g config diff.t40hide.textconv "sed -e s/ghp_[A-Za-z0-9]*/REDACTED/"
+mkdir -p "$T/t40"
+printf 't40/*.md diff=t40hide\n' > "$T/.gitattributes"
+printf 'token = "%s"\n' "$mtok" > "$T/t40/conf.md"
+g add .gitattributes t40/conf.md
+case "$(g diff --cached -- t40/conf.md)" in
+  *"$mtok"*) fail "T40 unrunnable: the textconv driver did not hide the token from the diff" ;;
+  *)
+    out=$(SNYK_HOOK_MODE=off g hook run pre-commit 2>&1); rc=$?
+    expect "T40 secret hidden by a textconv driver -> blocked" "$rc" 1
+    saw "T40a ... as a finding in the staged bytes" "$out" "found a secret in the staged bytes" ;;
+esac
+g config --unset diff.t40hide.textconv
+reset_tree
+
+# --- git am commits the index it read BEFORE pre-applypatch ---------------
+# So a local pre-applypatch that re-stages files would have the gate scan an
+# index git does not commit. The wrapper refuses that case outright.
+g checkout -q -b t41-src "$BASE"
+printf 'clean\n' > "$T/t41.txt"; g add t41.txt; g commit -q --no-verify -m t41-clean
+rm -f "$PD"/*.patch; g format-patch -q -1 -o "$PD" >/dev/null
+g checkout -q "$BASE"
+LOCALHOOKS="$(g rev-parse --absolute-git-dir)/hooks"; mkdir -p "$LOCALHOOKS"
+printf '#!/bin/sh\nprintf "restaged\\n" >> t41.txt && git add t41.txt\n' > "$LOCALHOOKS/pre-applypatch"
+chmod +x "$LOCALHOOKS/pre-applypatch"
+before=$(g rev-parse HEAD)
+out=$( cd "$T" && git am -q "$PD"/0001-*.patch 2>&1 ); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T41 local pre-applypatch re-stages files -> refused" "$rc" 1
+saw "T41a ... and says why" "$out" "changed the staged files"
+expect "T41b ... and nothing was committed" "$(g rev-parse HEAD)" "$before"
+g am --abort >/dev/null 2>&1
+rm -rf "$LOCALHOOKS"; reset_tree
+
+# --- git rebase --apply replays through git am, so the gate runs there ---
+g checkout -q -b t42-leaky "$BASE"
+printf 'token = "%s"\n' "$mtok" > "$T/t42.txt"; g add t42.txt; g commit -q --no-verify -m t42-leak
+g checkout -q "$BASE"
+printf 'moved\n' > "$T/t42base.txt"; g add t42base.txt; g commit -q --no-verify -m t42-base
+g checkout -q t42-leaky
+before=$(g rev-parse HEAD)
+out=$( cd "$T" && git rebase --apply "$BASE" 2>&1 ); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T42 rebase --apply of a commit holding a secret -> stopped" "$rc" 1
+saw "T42a ... by the secret gate" "$out" "found a secret"
+saw "T42b ... and points at git rebase to recover, not git am" "$out" "git rebase --abort"
+g rebase --abort >/dev/null 2>&1
+expect "T42c ... and rebase --abort restores the branch" "$(g rev-parse HEAD)" "$before"
+g checkout -q "$BASE"; reset_tree
+
 # --- the chain's recursion guard is per hook name -------------------------
 # git's applypatch-msg sample calls `$(git rev-parse --git-path hooks/commit-msg)`,
 # which under core.hooksPath is the commit-msg WRAPPER. With a single on/off
@@ -909,10 +965,16 @@ git -C "$RCV" config user.email t@t.local; git -C "$RCV" config user.name t
 git -C "$RCV" config core.hooksPath "$HERE"
 git -C "$RCV" config receive.denyCurrentBranch updateInstead
 printf 'one\n' > "$RCV/t39.txt"; git -C "$RCV" add t39.txt; git -C "$RCV" commit -q --no-verify -m one
-git clone -q "$RCV" "$SND/c"
+# The sender gets an empty hooks dir from the clone on: its fixture commits must
+# not run the developer's global hooks either (a global prepare-commit-msg
+# runs even with --no-verify), or T39 fails before the receiver is tested.
+NOHOOKS="$SND/nohooks"; mkdir -p "$NOHOOKS"
+# `git -c ... clone`, then local config: `git clone -c core.hooksPath=` is
+# refused by git's clone protection (2.45+).
+git -c core.hooksPath="$NOHOOKS" clone -q "$RCV" "$SND/c"
+git -C "$SND/c" config core.hooksPath "$NOHOOKS"
 git -C "$SND/c" config user.email t@t.local; git -C "$SND/c" config user.name t
 printf 'two\n' > "$SND/c/t39.txt"; git -C "$SND/c" commit -q --no-verify -am two
-NOHOOKS="$SND/nohooks"; mkdir -p "$NOHOOKS"
 git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push -q origin HEAD >/dev/null 2>&1; rc=$?
 expect "T39 push to a clean checked-out branch -> accepted" "$rc" 0
 expect "T39a ... and the receiving worktree was updated" "$(tr -d '\r' < "$RCV/t39.txt")" two
