@@ -921,7 +921,21 @@ printf 'three\n' > "$SND/c/t39.txt"; git -C "$SND/c" commit -q --no-verify -am t
 out=$(git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push origin HEAD 2>&1); rc=$?
 [ "$rc" -ne 0 ] && rc=1
 expect "T39b push onto a dirty checkout -> refused" "$rc" 1
-saw "T39c ... with git's reason" "$out" "unstaged changes"
+# The wrapper's own prefix: git's built-in updateInstead says "unstaged
+# changes" too, so without this the case passed with no wrapper at all.
+saw "T39c ... by the wrapper's fallback, not git's built-in one" "$out" "githooks: push-to-checkout: the working tree has unstaged changes"
+# A local push-to-checkout still owns the decision when there is one.
+git -C "$RCV" checkout -q -- t39.txt
+mkdir -p "$RCV/.git/hooks"
+printf '#!/bin/sh
+echo t39-local-hook >&2
+exit 1
+' > "$RCV/.git/hooks/push-to-checkout"
+chmod +x "$RCV/.git/hooks/push-to-checkout"
+out=$(git -C "$SND/c" -c core.hooksPath="$NOHOOKS" push origin HEAD 2>&1); rc=$?
+[ "$rc" -ne 0 ] && rc=1
+expect "T39d a local push-to-checkout is chained, and its refusal stands" "$rc" 1
+saw "T39e ... and it was the local hook that ran" "$out" "t39-local-hook"
 
 [ "$FAIL" -eq 0 ] && echo "all cases pass" || echo "FAILURES above"
 exit "$FAIL"

@@ -423,7 +423,7 @@ Run it per repository. Record pass or fail with the evidence (command output, ch
 - [ ] H2 Staging a synthetic credential (for example, a fake private-key block generated for the test) blocks the commit.
 - [ ] H3 `GITLEAKS_DEGRADED_OK=1` does **not** let H2's commit through.
 - [ ] H4 `sh Scripts/githooks/test-pre-commit.sh` passes.
-- [ ] H5 Merging a branch that holds H2's synthetic credential (committed there with `--no-verify`) with `git merge --no-ff` is refused, and no merge commit is made.
+- [ ] H5 In H4's output, T34 and T36 pass: an automatic merge of a branch holding a secret, and `git am` of a patch holding one, are both refused. (The suite plants those commits itself, so nobody has to bypass the hook by hand.)
 
 **CI**
 - [ ] C1 On the adoption PR, all seven checks ran and passed on the head: `gh pr checks $PR -R $OWNER/$REPO`.
