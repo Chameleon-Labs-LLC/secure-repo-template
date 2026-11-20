@@ -1,5 +1,21 @@
 #!/bin/sh
-# pre-applypatch hook: no logic of its own. Chains to the repo-local .git/hooks/pre-applypatch if present.
+# pre-applypatch hook: the secret gate for `git am`.
+# Git runs this hook, not pre-commit, after `git am` applies a patch and
+# before it commits it. Without a scan here, a mailed or format-patch patch
+# carrying a secret entered history unscanned. The applied patch is in the
+# index at this point, so the same staged scan pre-commit runs reads exactly
+# what is about to be committed.
+#
+# Snyk does not run here: a patch is reviewed and tested where it was made.
+# `git am --no-verify` skips this hook, as --no-verify skips pre-commit; the
+# same rules apply to it.
 HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$HOOK_DIR/_lib.sh"
-chain_local_hook pre-applypatch "$@"
+
+chain_local_hook pre-applypatch "$@" || exit $?
+
+if ! ( . "$HOOK_DIR/_secret_gate.sh" ); then
+  log "patch not committed. git am has stopped with the patch applied: fix the patch and run 'git am --continue', drop it with 'git am --skip', or give up with 'git am --abort'"
+  exit 1
+fi
+exit 0

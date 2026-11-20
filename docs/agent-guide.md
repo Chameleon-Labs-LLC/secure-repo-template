@@ -48,7 +48,7 @@ Out of scope: application security, cloud IAM, and secret rotation itself (the h
 
 | Component | Path | Runs when | Blocks? |
 |---|---|---|---|
-| Pre-commit hook (gitleaks, optional Snyk) | `Scripts/githooks/pre-commit`, with `_lib.sh`, the chain stubs and `install.sh` | Every `git commit` on a machine where it is installed | Yes for secrets, fail-closed. Snyk defaults to `warn` |
+| Pre-commit hook (gitleaks, optional Snyk) | `Scripts/githooks/pre-commit`, with `_secret_gate.sh`, `_lib.sh`, the chain stubs and `install.sh` | Every `git commit`, automatic merge commit (`pre-merge-commit`) and `git am` (`pre-applypatch`) on a machine where it is installed. Not cherry-pick, revert, rebase or stash: git runs no hook there | Yes for secrets, fail-closed. Snyk defaults to `warn` |
 | Hook self-test and shellcheck | `.github/workflows/githooks.yml` | Every PR, push to `main`, manual | Yes, if required |
 | Scans: `gitleaks`, `osv-scanner`, `zizmor`, `npm audit`, `npm audit signatures` | `.github/workflows/security.yml` | Every PR, push to `main`, weekly (Mondays 11:17 UTC), manual | Yes, if required |
 | Dependabot | `.github/dependabot.yml` plus two repo settings | Weekly and on advisories | No (opens PRs) |
@@ -122,7 +122,7 @@ What an agent MUST know about the hook:
 - A found secret blocks. **No variable passes a finding.**
 - A missing gitleaks (looked for on `PATH`, then `~/.local/bin`) or an errored scan also blocks. `GITLEAKS_DEGRADED_OK=1` (the exact value `1`) passes **only** a degraded scan, for one commit, and the commit message MUST say why. An agent MUST NOT set it without telling the human.
 - `SNYK_SKIP=1` skips Snyk only. `SNYK_HOOK_MODE=warn|block|off` (default `warn`). Snyk Open Source runs only when a manifest's dependency fields or a lockfile's resolved tree change (a `"version"` bump doesn't count); Snyk Code at most once per repo per day, when source files are staged.
-- `git commit --no-verify` skips every hook. An agent MUST NOT use it.
+- `--no-verify` (on `git commit`, `git merge` or `git am`) skips the scan. An agent MUST NOT use it.
 - The hook chains to the repo's own `.git/hooks/<name>`, running a local `pre-commit` **first**, so a formatter that re-stages files runs before the scan.
 - Supported: Linux, WSL, Git Bash. **Not macOS** (GNU `sed -z`, `sed -i`, `xargs -r`).
 - Self-test: `sh Scripts/githooks/test-pre-commit.sh` (needs git 2.36+, node and gitleaks; spends no Snyk quota).
@@ -138,7 +138,7 @@ Each file explains itself in its header comment. Read it before changing the fil
 | `.github/dependabot.yml` | Header comment (what the semver-major `ignore` does and doesn't gate), [step 4](security-setup.md#4-dependabot) |
 | `.npmrc` | Header comment (the `--min-release-age=0` override), [step 5](security-setup.md#5-minimum-package-age) |
 | `.coderabbit.yaml`, `.greptile/config.json` | Header comments, [step 6](security-setup.md#6-ai-pull-request-reviewers) |
-| `Scripts/githooks/pre-commit`, `_lib.sh`, `install.sh` | Header comments, [step 2](security-setup.md#2-pre-commit-hook-gitleaks-fails-closed) and [step 7](security-setup.md#7-snyk-optional-metered) |
+| `Scripts/githooks/pre-commit`, `_secret_gate.sh`, `pre-merge-commit`, `pre-applypatch`, `_lib.sh`, `install.sh` | Header comments, [step 2](security-setup.md#2-pre-commit-hook-gitleaks-fails-closed) and [step 7](security-setup.md#7-snyk-optional-metered) |
 | `SECURITY.md`, `AGENTS.md`, `CONTRIBUTING.md` | Starting points: replace the project parts, keep the security rules |
 
 ## 6. When each check runs, and what it reads
@@ -232,7 +232,7 @@ JSON
 
 ### 7.4 Caveats on the ruleset
 
-- **Solo maintainers.** GitHub doesn't let a PR's author approve their own PR. With `require_code_owner_review: true` and one code owner, every PR that touches an owned path needs a bypass. Choose on purpose: add a second code owner, or accept an admin bypass and rely on the local hook as the preventive gate. Write the choice in `AGENTS.md`.
+- **Solo maintainers.** GitHub doesn't let a PR's author approve their own PR. With `require_code_owner_review: true` and one code owner, every PR the owner **authors** that touches an owned path needs a bypass. (A PR from anyone else, Dependabot included, the owner can simply approve.) Choose on purpose: add a second code owner, or accept an admin bypass and rely on the local hook as the preventive gate. Write the choice in `AGENTS.md`.
 - **An admin bypass skips every required check as a gate**, not only reviews: GitHub can't scope a bypass by path. The checks still run on `push` and fail visibly afterwards, so on an admin push the local hook is the only gate that stops a secret first. Every machine holding an admin token MUST have the fail-closed hook installed and verified.
 - AI reviewers are not GitHub status checks here. Waiting for them is a merge rule (section 8), and only where they are installed.
 
@@ -423,6 +423,7 @@ Run it per repository. Record pass or fail with the evidence (command output, ch
 - [ ] H2 Staging a synthetic credential (for example, a fake private-key block generated for the test) blocks the commit.
 - [ ] H3 `GITLEAKS_DEGRADED_OK=1` does **not** let H2's commit through.
 - [ ] H4 `sh Scripts/githooks/test-pre-commit.sh` passes.
+- [ ] H5 Merging a branch that holds H2's synthetic credential (committed there with `--no-verify`) with `git merge --no-ff` is refused, and no merge commit is made.
 
 **CI**
 - [ ] C1 On the adoption PR, all seven checks ran and passed on the head: `gh pr checks $PR -R $OWNER/$REPO`.
@@ -451,7 +452,7 @@ Run it per repository. Record pass or fail with the evidence (command output, ch
 
 ## 13. Rules for agents, in one place
 
-1. Never commit a secret; never `--no-verify`; never `GITLEAKS_DEGRADED_OK=1` without telling the human why. Never write a secret's value anywhere.
+1. Never commit a secret; never `--no-verify` (commit, merge or am); never `GITLEAKS_DEGRADED_OK=1` without telling the human why. Never write a secret's value anywhere.
 2. Never add a suppression (ignore entry, allow comment, scanner ignore, `.snyk` ignore) to make a check pass. Report the finding.
 3. Never use `pull_request_target`. Pin every action to the full SHA of a tagged release.
 4. Fix with the lowest version that clears the advisory, even if it is younger than the 7-day floor.

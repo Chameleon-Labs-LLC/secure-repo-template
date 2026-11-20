@@ -41,12 +41,14 @@ A template copies **files only**. Repository settings, rulesets and installed ap
 
 ## 2. Pre-commit hook: gitleaks, fails closed
 
-`Scripts/githooks/pre-commit` scans every commit's staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before the commit is made. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
+The hooks scan the staged changes with [gitleaks](https://github.com/gitleaks/gitleaks) before git writes a commit: `pre-commit` for `git commit`, `pre-merge-commit` for a merge commit git creates itself, and `pre-applypatch` for `git am`. All three run the same gate, `Scripts/githooks/_secret_gate.sh`. CI scans too, but only after a push, when the secret is already in history. The hook is the only gate that stops it first.
+
+It covers only machines where it is installed and active (a repo with its own `core.hooksPath` overrides a global install, see below). And git runs no hook before `git cherry-pick`, `git revert`, `git rebase` or `git stash` writes a commit, so those are covered by CI alone. They replay commits that were usually scanned when first made; the exposure is content fetched from elsewhere.
 
 It **fails closed**:
 
 - A found secret blocks the commit. No environment variable passes a finding.
-- A missing `gitleaks`, or a scan that errors, also blocks. An unscanned commit is not a clean commit.
+- A missing `gitleaks`, or a scan that errors, also blocks. An unscanned commit is not a clean commit. The one exception is `GITLEAKS_DEGRADED_OK=1`, which passes a scan that could not run, for one commit, and must be explained in the commit message. It never passes a found secret.
 - It also scans the staged bytes of files git cannot show as a text diff (binary files, or files marked `-diff` in `.gitattributes`), which a plain `gitleaks --staged` run skips.
 
 **Install gitleaks.**
@@ -114,7 +116,7 @@ WSL and Git Bash each have their own git and global config, so run the global in
 
 Two things to know:
 
-- The hooks chain to a repo's own `.git/hooks/<name>`, so existing local hooks keep working. For `pre-commit` the local hook runs **first**, so a formatter that re-stages files runs before gitleaks scans the index. Chained: the commit, merge, rebase, checkout, push, `git am`, `gc` and `send-email` hooks. Not chained, because they run very often or speak a special protocol: `reference-transaction`, `post-index-change`, `fsmonitor-watchman`, the `p4-*` hooks, and server-side hooks.
+- The hooks chain to a repo's own `.git/hooks/<name>`, so existing local hooks keep working. For `pre-commit`, `pre-merge-commit` and `pre-applypatch` the local hook runs **first**, so anything it re-stages is scanned. A local hook without the executable bit is skipped on Linux and WSL, as git itself would skip it; on Git for Windows, which cannot store the bit, it runs under `sh`. With no local `push-to-checkout`, the wrapper does git's default worktree update for `receive.denyCurrentBranch=updateInstead`. Chained: the commit, merge, rebase, checkout, push, `git am`, `gc` and `send-email` hooks. Not chained, because they run very often or speak a special protocol: `reference-transaction`, `post-index-change`, `fsmonitor-watchman`, the `p4-*` hooks, and server-side hooks.
 - A repo with its **own** `core.hooksPath` (Husky sets one) overrides the global setting, and these hooks do not run there. `git config --local --get core.hooksPath` shows it.
 
 **When it blocks you.**
@@ -125,7 +127,7 @@ Two things to know:
 | A false positive | Add a `gitleaks:allow` comment on the line, or add the fingerprint gitleaks prints to `.gitleaksignore`. CI ignores `gitleaks:allow`, and on a pull request it uses the base branch's `.gitleaksignore`, so merge the `.gitleaksignore` entry first, in its own PR. |
 | gitleaks missing or broken | Fix the install. For one commit only, `GITLEAKS_DEGRADED_OK=1 git commit ...` passes a scan that could not run (never a found secret). Say why in the commit message. |
 
-`git commit --no-verify` skips every hook. Treat needing it as a problem to fix, not a habit.
+`--no-verify` on `git commit`, `git merge` or `git am` skips the scan. Treat needing it as a problem to fix, not a habit. Agents must not use it at all.
 
 **Test the hook** (needs `git` 2.36+, `node` and `gitleaks`; spends no Snyk quota):
 

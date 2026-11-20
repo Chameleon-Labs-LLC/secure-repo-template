@@ -1,5 +1,25 @@
 #!/bin/sh
-# pre-merge-commit hook: no logic of its own. Chains to the repo-local .git/hooks/pre-merge-commit if present.
+# pre-merge-commit hook: the secret gate for AUTOMATIC merge commits.
+# Git runs this hook, not pre-commit, when `git merge` (or `git pull`) creates
+# the merge commit itself. Without a scan here, merging a branch that carries
+# a secret -- committed on another machine, or past the hook with --no-verify
+# -- put it into history unscanned. At this point the index holds the merged
+# result, so the same staged scan pre-commit runs reads exactly what is about
+# to be committed. A conflicted merge is committed with `git commit`, which
+# runs pre-commit instead.
+#
+# Snyk does not run here: the merged-in commits were tested when they were
+# made. `git merge --no-verify` skips this hook, as --no-verify skips
+# pre-commit; the same rules apply to it.
 HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$HOOK_DIR/_lib.sh"
-chain_local_hook pre-merge-commit "$@"
+
+# The local hook first, for the same reason as in pre-commit: anything it
+# re-stages is then scanned.
+chain_local_hook pre-merge-commit "$@" || exit $?
+
+if ! ( . "$HOOK_DIR/_secret_gate.sh" ); then
+  log "merge commit not created. The merge result is still staged: fix the branch being merged (remove the secret there, and rotate it if it was ever pushed), or 'git merge --abort'"
+  exit 1
+fi
+exit 0

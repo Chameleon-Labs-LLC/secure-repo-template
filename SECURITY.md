@@ -14,7 +14,7 @@ Only the latest commit on the default branch is supported. Fixes are not backpor
 
 ## What we already do
 
-This repository scans for secrets before every commit and in CI, scans dependencies and GitHub Actions for known vulnerabilities on every change and weekly, and keeps dependencies current with Dependabot. The setup is described in [docs/security-setup.md](docs/security-setup.md).
+This repository scans for secrets in CI, and before each commit on machines where the git hooks are installed (`git commit`, automatic merge commits and `git am`; see [docs/security-setup.md](docs/security-setup.md#2-pre-commit-hook-gitleaks-fails-closed) for what the hook does not cover), scans dependencies and GitHub Actions for known vulnerabilities on every change and weekly, and keeps dependencies current with Dependabot. The setup is described in [docs/security-setup.md](docs/security-setup.md).
 
 <!--
 If you made your repository from this template:
